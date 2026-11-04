@@ -391,18 +391,8 @@ globalThis.__neoSchemaReady = true;
 
     const clientIp = () => request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'unknown';
 
-    const checkRateLimit = async (username) => {
-      await ensureAuthTables();
-      const since = Date.now() - LOGIN_WINDOW_MS;
-      const ip = clientIp();
-      try {
-        const rows = (await env.DB.prepare(
-          `SELECT * FROM login_attempts WHERE at > ? AND ok = 0 AND (username = ? OR ip = ?)`
-        ).bind(since, username.toLowerCase(), ip).all()).results || [];
-        if (rows.length >= LOGIN_MAX_FAILS) {
-          return { blocked: true, retryAfterMin: Math.ceil(LOGIN_WINDOW_MS / 60000) };
-        }
-      } catch (_) {}
+    const checkRateLimit = async (_username) => {
+      // Login lockout disabled per user request
       return { blocked: false };
     };
     const writeSecurityAudit = async (authUser, action, entity, detail) => {
