@@ -1067,19 +1067,30 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(shopProfile)
       });
+      const data = await response.json().catch(() => ({}));
       if (response.ok) {
-        if (tenantInfo && shopProfile.name) {
-          const nextTenant = { ...tenantInfo, name: shopProfile.name };
-          setTenantInfo(nextTenant);
-          try { localStorage.setItem('erp_tenant', JSON.stringify(nextTenant)); } catch (e) {}
+        if (data.profile) {
+          setShopProfile(prev => ({ ...prev, ...data.profile }));
         }
+        if (shopProfile.name) {
+          setTenantInfo(prev => {
+            const next = prev ? { ...prev, name: shopProfile.name } : { id: 'tenant-default', name: shopProfile.name };
+            try { localStorage.setItem('erp_tenant', JSON.stringify(next)); } catch (e) {}
+            return next;
+          });
+        }
+        try {
+          const tid = (tenantInfo && tenantInfo.id) || 'tenant-default';
+          localStorage.setItem('erp_shop_profile__' + tid, JSON.stringify(shopProfile));
+        } catch (_) {}
+        logAudit('update', 'business_profile', `Updated business profile: ${shopProfile.name || 'Shop'}`);
         alert('Business profile updated and saved to database successfully!');
       } else {
-        alert('Failed to update business profile in database.');
+        alert(data.error || 'Failed to update business profile in database.');
       }
     } catch (err) {
       console.error('Error saving shop profile:', err);
-      alert('Failed to update business profile in database.');
+      alert('Network error: Failed to update business profile in database.');
     }
   };
 

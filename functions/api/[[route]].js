@@ -3765,22 +3765,23 @@ globalThis.__neoSchemaReady = true;
     }
 
     // 14. SHOP PROFILE CRUD
+    // 14. SHOP PROFILE CRUD
     if (routeType === 'shop-profile') {
       if (request.method === 'PUT' || request.method === 'POST') {
         const body = await request.json();
         const tid = auth.tenantId || 'tenant-default';
-        const name = body.name || '';
-        const tagline = body.tagline || '';
-        const currency = body.currency || 'KSh';
-        const phone = body.phone || '';
-        const location = body.location || '';
+        const name = String(body.name || '').trim();
+        const tagline = String(body.tagline || '').trim();
+        const currency = String(body.currency || 'KSh').trim();
+        const phone = String(body.phone || '').trim();
+        const location = String(body.location || '').trim();
         let saved = false;
         try {
-          const existing = await env.DB.prepare(`SELECT id FROM shop_profile WHERE tenantId = ? LIMIT 1`).bind(tid).first();
+          const existing = await env.DB.prepare(`SELECT id FROM shop_profile WHERE tenantId = ? OR id = ? LIMIT 1`).bind(tid, tid).first();
           if (existing) {
             await env.DB.prepare(
-              `UPDATE shop_profile SET name = ?, tagline = ?, currency = ?, phone = ?, location = ? WHERE tenantId = ?`
-            ).bind(name, tagline, currency, phone, location, tid).run();
+              `UPDATE shop_profile SET name = ?, tagline = ?, currency = ?, phone = ?, location = ?, tenantId = ? WHERE id = ? OR tenantId = ?`
+            ).bind(name, tagline, currency, phone, location, tid, existing.id, tid).run();
             saved = true;
           } else {
             await env.DB.prepare(
@@ -3810,7 +3811,14 @@ globalThis.__neoSchemaReady = true;
           try { await env.DB.prepare(`UPDATE tenants SET name = ? WHERE id = ?`).bind(name, tid).run(); } catch (_) {}
         }
         if (!saved) return json({ error: 'Failed to save shop profile' }, 500);
-        return new Response(JSON.stringify({ success: true, name }), { headers: { 'Content-Type': 'application/json' } });
+        const profile = { id: String(tid), name, tagline, currency, phone, location, tenantId: tid };
+        return json({ success: true, name, profile });
+      }
+      if (request.method === 'GET') {
+        const tid = (auth && auth.tenantId) || 'tenant-default';
+        let row = await env.DB.prepare('SELECT * FROM shop_profile WHERE tenantId = ? OR id = ? LIMIT 1').bind(tid, tid).first();
+        if (!row && tid === 'tenant-default') row = await env.DB.prepare('SELECT * FROM shop_profile WHERE id = 1').first();
+        return json({ profile: row || null });
       }
     }
 
