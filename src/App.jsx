@@ -3651,33 +3651,6 @@ export default function App() {
               <button type="button" onClick={() => { setAuthMode('super'); setLoginUsername(''); setLoginPin(''); }} className="text-amber-400 hover:text-amber-300 font-semibold">Super-admin login</button>
             </p>
           )}
-
-          <div className="pt-3 border-t border-slate-800/80 space-y-2">
-            <p className="text-[11px] text-slate-400 text-center font-medium">Quick Fill Credentials</p>
-            <div className="grid grid-cols-3 gap-1.5 text-[11px]">
-              <button
-                type="button"
-                onClick={() => { setAuthMode('login'); setLoginUsername('Main Admin'); setLoginPin('1234'); }}
-                className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/70 text-emerald-300 font-medium transition-colors"
-              >
-                Admin (1234)
-              </button>
-              <button
-                type="button"
-                onClick={() => { setAuthMode('login'); setLoginUsername('Alice Wambui'); setLoginPin('5678'); }}
-                className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/70 text-sky-300 font-medium transition-colors"
-              >
-                Sales (5678)
-              </button>
-              <button
-                type="button"
-                onClick={() => { setAuthMode('super'); setLoginUsername('platform'); setLoginPin('1234'); }}
-                className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/70 text-amber-300 font-medium transition-colors"
-              >
-                Platform (1234)
-              </button>
-            </div>
-          </div>
         </div>
       </div>
     );
