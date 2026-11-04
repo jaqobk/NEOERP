@@ -237,6 +237,104 @@ export async function onRequest(context) {
           try { await env.DB.prepare(`UPDATE ${t} SET tenantId = 'tenant-default' WHERE tenantId IS NULL OR tenantId = ''`).run(); } catch (_) {}
         }
       } catch (_) {}
+
+      // Auto-seed default users and roles if the D1 database is newly created and empty
+      try {
+        const uCountRow = await env.DB.prepare('SELECT COUNT(*) as c FROM users').first();
+        const uCount = Number(uCountRow?.c) || 0;
+        if (uCount === 0) {
+          const tid = 'tenant-default';
+          const branchId = 'br-default-main';
+          const now = Date.now();
+
+          try {
+            await env.DB.prepare(
+              `INSERT OR IGNORE INTO branches (id, tenantId, name, address, phone, status, isDefault, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(branchId, tid, 'Main Branch - CBD', 'Kimathi Street, Nairobi', '+254 700 000000', 'Active', 1, now).run();
+          } catch (_) {}
+
+          try {
+            await env.DB.prepare(
+              `INSERT OR IGNORE INTO shop_profile (id, name, tagline, currency, phone, location, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?)`
+            ).bind(tid, 'NEO Fashion Boutique', 'Premium Apparel & Footwear', 'KSh', '+254 700 000000', 'Kimathi Street, Nairobi', tid).run();
+          } catch (_) {}
+
+          // Seed default users (plain PINs automatically hash with PBKDF2 on first login)
+          const insUser = env.DB.prepare(`INSERT OR IGNORE INTO users (id, name, role, pin, phone, status, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+          await insUser.bind('u1', 'Main Admin', 'Admin', '1234', '+254 700 000000', 'Active', tid).run();
+          await insUser.bind('u2', 'Alice Wambui', 'Salesperson', '5678', '+254 711 222333', 'Active', tid).run();
+          await insUser.bind('u3', 'Benta Akinyi', 'Manager', '0000', '+254 733 999888', 'Active', tid).run();
+
+          // Seed default roles
+          const adminPriv = JSON.stringify({
+            dashboard: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            pos: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            sales: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            inventory: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            expenses: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            laybys: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            customers: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            suppliers: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            reports: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            reportSales: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportPurchase: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportExpense: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportHr: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportCustomer: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportInventory: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportAging: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportFinancial: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportLedger: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            settings: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            purchase: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            employees: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            payroll: { view: true, create: true, update: true, delete: true, ownOnly: false },
+            hr: { view: true, create: true, update: true, delete: true, ownOnly: false }
+          });
+          const managerPriv = JSON.stringify({
+            dashboard: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            pos: { view: true, create: true, update: true, delete: false, ownOnly: false },
+            sales: { view: true, create: true, update: true, delete: false, ownOnly: false },
+            inventory: { view: true, create: true, update: true, delete: false, ownOnly: false },
+            expenses: { view: true, create: true, update: true, delete: false, ownOnly: false },
+            laybys: { view: true, create: true, update: true, delete: false, ownOnly: false },
+            customers: { view: true, create: true, update: true, delete: false, ownOnly: false },
+            suppliers: { view: true, create: true, update: true, delete: false, ownOnly: false },
+            reports: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportSales: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportPurchase: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportExpense: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportHr: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            reportCustomer: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            settings: { view: false, create: false, update: false, delete: false, ownOnly: false },
+            purchase: { view: true, create: true, update: true, delete: false, ownOnly: false },
+            employees: { view: true, create: true, update: true, delete: false, ownOnly: false },
+            payroll: { view: true, create: true, update: true, delete: false, ownOnly: false },
+            hr: { view: true, create: true, update: true, delete: false, ownOnly: false }
+          });
+          const salesPriv = JSON.stringify({
+            dashboard: { view: false, create: false, update: false, delete: false, ownOnly: false },
+            pos: { view: true, create: true, update: false, delete: false, ownOnly: true },
+            sales: { view: true, create: false, update: false, delete: false, ownOnly: true },
+            inventory: { view: true, create: false, update: false, delete: false, ownOnly: false },
+            expenses: { view: false, create: false, update: false, delete: false, ownOnly: false },
+            laybys: { view: true, create: true, update: true, delete: false, ownOnly: true },
+            customers: { view: true, create: true, update: true, delete: false, ownOnly: false },
+            suppliers: { view: false, create: false, update: false, delete: false, ownOnly: false },
+            reports: { view: false, create: false, update: false, delete: false, ownOnly: false },
+            settings: { view: false, create: false, update: false, delete: false, ownOnly: false },
+            purchase: { view: false, create: false, update: false, delete: false, ownOnly: false },
+            employees: { view: false, create: false, update: false, delete: false, ownOnly: false },
+            payroll: { view: false, create: false, update: false, delete: false, ownOnly: false },
+            hr: { view: false, create: false, update: false, delete: false, ownOnly: false }
+          });
+
+          const insRole = env.DB.prepare(`INSERT OR IGNORE INTO roles (id, name, privileges, tenantId) VALUES (?, ?, ?, ?)`);
+          await insRole.bind('role-admin', 'Admin', adminPriv, tid).run();
+          await insRole.bind('role-manager', 'Manager', managerPriv, tid).run();
+          await insRole.bind('role-sales', 'Salesperson', salesPriv, tid).run();
+        }
+      } catch (_) {}
       // Best-effort composite uniqueness (SQLite may ignore if duplicates already exist)
       try { await env.DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tenant_name ON users(tenantId, name)`).run(); } catch (_) {}
       try { await env.DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_tenant_name ON roles(tenantId, name)`).run(); } catch (_) {}
