@@ -4,5 +4,5 @@ pages_build_output_dir = "dist"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "kingdb"
-database_id = "959f8b01-05b8-4d0e-8801-81832fc0d2f9"
+database_name = "neodb"
+database_id = "bf24b08c-4037-4183-b809-92624487ac76"
