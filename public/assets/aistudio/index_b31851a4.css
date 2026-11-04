@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+/* Light mobile helpers — does not change desktop layout */
+@media (max-width: 640px) {
+  main.max-w-7xl {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+  header .overflow-x-auto {
+    -webkit-overflow-scrolling: touch;
+  }
+}
