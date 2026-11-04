@@ -305,12 +305,36 @@ export default function App() {
   const [expensePaidToFilter, setExpensePaidToFilter] = useState('');
 
   // --- Business Profile State ---
-  const [shopProfile, setShopProfile] = useState({
-    name: '',
-    tagline: '',
-    currency: 'KSh',
-    phone: '',
-    location: ''
+  const [shopProfile, setShopProfile] = useState(() => {
+    try {
+      const savedTenant = JSON.parse(localStorage.getItem('erp_tenant') || 'null');
+      const tid = (savedTenant && savedTenant.id) || 'tenant-default';
+      const cached = JSON.parse(localStorage.getItem('erp_shop_profile__' + tid) || 'null');
+      if (cached && typeof cached === 'object') {
+        return {
+          name: cached.name || savedTenant?.name || '',
+          tagline: cached.tagline || '',
+          currency: cached.currency || 'KSh',
+          phone: cached.phone || '',
+          location: cached.location || ''
+        };
+      }
+      return {
+        name: savedTenant?.name || '',
+        tagline: '',
+        currency: 'KSh',
+        phone: '',
+        location: ''
+      };
+    } catch (_) {
+      return {
+        name: '',
+        tagline: '',
+        currency: 'KSh',
+        phone: '',
+        location: ''
+      };
+    }
   });
 
   // Dynamic States with Full Mock Dataset
@@ -3384,19 +3408,36 @@ export default function App() {
         setReturnRequests([]);
       } catch (e) {}
 
+      if (data.shopProfile) {
+        setShopProfile({
+          name: data.shopProfile.name || '',
+          tagline: data.shopProfile.tagline || '',
+          currency: data.shopProfile.currency || 'KSh',
+          phone: data.shopProfile.phone || '',
+          location: data.shopProfile.location || ''
+        });
+        try {
+          const tid = (data.tenant && data.tenant.id) || 'tenant-default';
+          localStorage.setItem('erp_shop_profile__' + tid, JSON.stringify(data.shopProfile));
+        } catch (_) {}
+      } else if (data.tenant) {
+        const tid = data.tenant.id || 'tenant-default';
+        let cached = null;
+        try { cached = JSON.parse(localStorage.getItem('erp_shop_profile__' + tid) || 'null'); } catch (_) {}
+        setShopProfile({
+          name: (cached && cached.name) || data.tenant.name || '',
+          tagline: (cached && cached.tagline) || '',
+          currency: (cached && cached.currency) || 'KSh',
+          phone: (cached && cached.phone) || '',
+          location: (cached && cached.location) || ''
+        });
+      }
+
       if (data.tenant) {
         setTenantInfo(data.tenant);
         if (data.tenant.maxUsers) setMaxUsers(data.tenant.maxUsers);
         if (data.tenant.maxBranches) setMaxBranches(data.tenant.maxBranches);
         try { localStorage.setItem('erp_tenant', JSON.stringify(data.tenant)); } catch (e) {}
-        // Seed profile with signup business name immediately (API may refine)
-        setShopProfile(prev => ({
-          name: data.tenant.name || prev.name || '',
-          tagline: prev.tagline || '',
-          currency: prev.currency || 'KSh',
-          phone: prev.phone || '',
-          location: prev.location || ''
-        }));
         try {
           const tid = data.tenant.id || 'unknown';
           const a = JSON.parse(localStorage.getItem('erp_audit_log__' + tid) || '[]');

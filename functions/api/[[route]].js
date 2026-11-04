@@ -1264,12 +1264,19 @@ globalThis.__neoSchemaReady = true;
         await appendTenantAuditRecord(userTenantId, user.name, 'login', 'session', `User signed in (${user.role || 'Staff'})`);
         await writeSecurityAudit({ user, tenantId: userTenantId }, 'login', 'session', user.name);
       } catch (_) {}
+      let loginShopProfile = null;
+      try {
+        const pTid = user.tenantId || 'tenant-default';
+        loginShopProfile = await env.DB.prepare('SELECT * FROM shop_profile WHERE tenantId = ? OR id = ? LIMIT 1').bind(pTid, pTid).first();
+        if (!loginShopProfile && pTid === 'tenant-default') loginShopProfile = await env.DB.prepare('SELECT * FROM shop_profile WHERE id = 1').first();
+      } catch (_) {}
       return json({
         token,
         expiresAt,
         user: { id: user.id, name: user.name, role: user.role, status: user.status, phone: user.phone || '', photo: user.photo || '', tenantId: user.tenantId || 'tenant-default' },
         privileges: parsePrivileges(roleRow?.privileges),
-        tenant: tenant ? { id: tenant.id, name: tenant.name, plan: tenant.plan, status: tenant.status, maxUsers: tenant.maxUsers, maxBranches: tenant.maxBranches } : null
+        tenant: tenant ? { id: tenant.id, name: tenant.name, plan: tenant.plan, status: tenant.status, maxUsers: tenant.maxUsers, maxBranches: tenant.maxBranches } : null,
+        shopProfile: loginShopProfile || null
       });
     }
 
