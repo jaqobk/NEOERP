@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS shop_profile (
   currency TEXT,
   phone TEXT,
   location TEXT,
+  logo TEXT,
+  creditPolicy TEXT DEFAULT 'warn',
   tenantId TEXT
 );
 
@@ -36,6 +38,7 @@ CREATE TABLE IF NOT EXISTS customers (
   location TEXT,
   eligibility TEXT,
   loyaltyPoints REAL DEFAULT 0,
+  creditLimit REAL DEFAULT 0,
   salesTermId TEXT,
   paymentTerm TEXT,
   tags TEXT,
@@ -187,6 +190,7 @@ CREATE TABLE IF NOT EXISTS tenant_settings (
   itemVariances TEXT,
   poApprovalLimit REAL DEFAULT 0,
   returnRequests TEXT,
+  creditPolicy TEXT DEFAULT 'warn',
   updatedAt INTEGER
 );
 

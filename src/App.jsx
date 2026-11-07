@@ -316,7 +316,9 @@ export default function App() {
           tagline: cached.tagline || '',
           currency: cached.currency || 'KSh',
           phone: cached.phone || '',
-          location: cached.location || ''
+          location: cached.location || '',
+          logo: cached.logo || '',
+          creditPolicy: cached.creditPolicy || 'warn'
         };
       }
       return {
@@ -324,7 +326,9 @@ export default function App() {
         tagline: '',
         currency: 'KSh',
         phone: '',
-        location: ''
+        location: '',
+        logo: '',
+        creditPolicy: 'warn'
       };
     } catch (_) {
       return {
@@ -332,10 +336,66 @@ export default function App() {
         tagline: '',
         currency: 'KSh',
         phone: '',
-        location: ''
+        location: '',
+        logo: '',
+        creditPolicy: 'warn'
       };
     }
   });
+
+  const [creditPolicy, setCreditPolicy] = useState(() => {
+    try {
+      const savedTenant = JSON.parse(localStorage.getItem('erp_tenant') || 'null');
+      const tid = (savedTenant && savedTenant.id) || 'tenant-default';
+      const cached = JSON.parse(localStorage.getItem('erp_shop_profile__' + tid) || 'null');
+      return cached?.creditPolicy || 'warn';
+    } catch (_) {
+      return 'warn';
+    }
+  });
+
+  const compressLogoImage = (file) => {
+    return new Promise((resolve, reject) => {
+      if (!file) return reject(new Error('No file provided'));
+      if (!file.type || !file.type.startsWith('image/')) return reject(new Error('File is not an image'));
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX_DIM = 256;
+          let width = img.width;
+          let height = img.height;
+          if (width > height) {
+            if (width > MAX_DIM) {
+              height = Math.round((height * MAX_DIM) / width);
+              width = MAX_DIM;
+            }
+          } else {
+            if (height > MAX_DIM) {
+              width = Math.round((width * MAX_DIM) / height);
+              height = MAX_DIM;
+            }
+          }
+          canvas.width = Math.max(1, width);
+          canvas.height = Math.max(1, height);
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            const compressed = canvas.toDataURL('image/jpeg', 0.82);
+            resolve(compressed);
+          } else {
+            resolve(e.target.result);
+          }
+        };
+        img.onerror = () => reject(new Error('Failed to load image into canvas'));
+        img.src = e.target.result;
+      };
+      reader.onerror = () => reject(new Error('Failed to read image file'));
+      reader.readAsDataURL(file);
+    });
+  };
 
   // Dynamic States with Full Mock Dataset
   const [categories, setCategories] = useState([]);
@@ -467,7 +527,7 @@ export default function App() {
     { id: 'var-colour', name: 'Colour' }
   ]);
   const [varianceDraft, setVarianceDraft] = useState('');
-  const [customerForm, setCustomerForm] = useState({ name: '', phone: '', location: '', eligibility: ['Paid'], salesTermId: '', paymentTerm: '', tags: '', priceList: 'retail', kraPin: '', loyaltyPoints: 0 });
+  const [customerForm, setCustomerForm] = useState({ name: '', phone: '', location: '', eligibility: ['Paid'], salesTermId: '', paymentTerm: '', tags: '', priceList: 'retail', kraPin: '', loyaltyPoints: 0, creditLimit: 0 });
   
   const [addUserModalOpen, setAddUserModalOpen] = useState(false);
   const [addRoleModalOpen, setAddRoleModalOpen] = useState(false);
@@ -594,6 +654,7 @@ export default function App() {
             const custs = data.customers.map(c => ({
               ...c,
               loyaltyPoints: parseFloat(c.loyaltyPoints) || 0,
+              creditLimit: parseFloat(c.creditLimit) || 0,
               eligibility: typeof c.eligibility === 'string' ? JSON.parse(c.eligibility || '["Paid"]') : (c.eligibility || ['Paid'])
             }));
             setCustomers(custs);
@@ -634,7 +695,10 @@ export default function App() {
             }));
           }
           if (data.roles?.length) setRoles(data.roles.map(r => ({ ...r, privileges: typeof r.privileges === 'string' ? JSON.parse(r.privileges) : r.privileges })));
-          if (data.shopProfile) setShopProfile(data.shopProfile);
+          if (data.shopProfile) {
+            setShopProfile(data.shopProfile);
+            if (data.shopProfile.creditPolicy) setCreditPolicy(data.shopProfile.creditPolicy);
+          }
           if (Array.isArray(data.branches)) {
             setBranches(data.branches);
             setMaxBranches(data.maxBranches || 1);
@@ -725,6 +789,10 @@ export default function App() {
               if (ts.returnRequests) {
                 const rr = typeof ts.returnRequests === 'string' ? JSON.parse(ts.returnRequests || '[]') : ts.returnRequests;
                 if (Array.isArray(rr)) setReturnRequests(rr);
+              }
+              if (ts.creditPolicy) {
+                setCreditPolicy(ts.creditPolicy);
+                setShopProfile(p => ({ ...p, creditPolicy: ts.creditPolicy }));
               }
             } catch (e) {}
           }
@@ -1086,15 +1154,17 @@ export default function App() {
   // --- SETTINGS DATABASE SYNC HANDLERS ---
   const handleSaveShopProfile = async () => {
     try {
+      const payload = { ...shopProfile, creditPolicy };
       const response = await apiFetch('/api/shop-profile', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(shopProfile)
+        body: JSON.stringify(payload)
       });
       const data = await response.json().catch(() => ({}));
       if (response.ok) {
         if (data.profile) {
           setShopProfile(prev => ({ ...prev, ...data.profile }));
+          if (data.profile.creditPolicy) setCreditPolicy(data.profile.creditPolicy);
         }
         if (shopProfile.name) {
           setTenantInfo(prev => {
@@ -1105,8 +1175,9 @@ export default function App() {
         }
         try {
           const tid = (tenantInfo && tenantInfo.id) || 'tenant-default';
-          localStorage.setItem('erp_shop_profile__' + tid, JSON.stringify(shopProfile));
+          localStorage.setItem('erp_shop_profile__' + tid, JSON.stringify(payload));
         } catch (_) {}
+        saveTenantSettingsPartial({ creditPolicy });
         logAudit('update', 'business_profile', `Updated business profile: ${shopProfile.name || 'Shop'}`);
         alert('Business profile updated and saved to database successfully!');
       } else {
@@ -2295,6 +2366,45 @@ export default function App() {
       return;
     }
 
+    // Customer Max Credit Limit Enforcement (Stop Sale vs Warning Alert Policy)
+    if (posSaleType === 'Credit' || balanceAmt > 0.009) {
+      const custCreditLimit = parseFloat(customerObj?.creditLimit) || 0;
+      if (custCreditLimit > 0) {
+        const currentDebt = (sales || [])
+          .filter(s => (s.customerName === posSelectedCustomer || (customerObj?.id && s.customerId === customerObj.id)) && (parseFloat(s.balanceDue) || 0) > 0.009)
+          .reduce((sum, s) => sum + (parseFloat(s.balanceDue) || 0), 0);
+        const projectedDebt = currentDebt + balanceAmt;
+        if (projectedDebt > custCreditLimit + 0.009) {
+          const excess = projectedDebt - custCreditLimit;
+          const curr = shopProfile.currency || 'KSh';
+          const effPolicy = creditPolicy || shopProfile.creditPolicy || 'warn';
+          if (effPolicy === 'stop') {
+            alert(
+              `🛑 SALE BLOCKED — CREDIT LIMIT EXCEEDED!\n\n` +
+              `Customer: ${posSelectedCustomer}\n` +
+              `Max Credit Limit: ${curr} ${custCreditLimit.toLocaleString()}\n` +
+              `Current Outstanding Debt: ${curr} ${currentDebt.toLocaleString()}\n` +
+              `This Sale Balance Due: ${curr} ${balanceAmt.toLocaleString()}\n` +
+              `Projected Total Debt: ${curr} ${projectedDebt.toLocaleString()} (Exceeds limit by ${curr} ${excess.toLocaleString()})\n\n` +
+              `Business owner policy is set to STOP SALE when credit limit is exceeded. Sale cannot proceed until customer clears existing debt or credit limit is increased.`
+            );
+            return;
+          } else {
+            const proceed = window.confirm(
+              `⚠️ WARNING: CUSTOMER CREDIT LIMIT EXCEEDED!\n\n` +
+              `Customer: ${posSelectedCustomer}\n` +
+              `Max Credit Limit: ${curr} ${custCreditLimit.toLocaleString()}\n` +
+              `Current Outstanding Debt: ${curr} ${currentDebt.toLocaleString()}\n` +
+              `This Sale Balance Due: ${curr} ${balanceAmt.toLocaleString()}\n` +
+              `Projected Total Debt: ${curr} ${projectedDebt.toLocaleString()} (Exceeds limit by ${curr} ${excess.toLocaleString()})\n\n` +
+              `Do you wish to override the credit limit and continue selling to this customer?`
+            );
+            if (!proceed) return;
+          }
+        }
+      }
+    }
+
     // Never accept payment above the sale total
     if (totalPaidNum > cartTotal + 0.009) {
       alert(`Payment cannot exceed the sale total.\nSale total: ${(shopProfile.currency || '')} ${cartTotal.toLocaleString()}\nEntered: ${(shopProfile.currency || '')} ${totalPaidNum.toLocaleString()}\nPlease adjust Cash / M-Pesa so the total paid equals the sale amount (or less for credit/layby).`);
@@ -2522,7 +2632,8 @@ export default function App() {
     const newCust = {
       id: `cust-${Date.now()}`,
       createdBy: currentUser?.name || currentUser?.id || '',
-      ...customerForm
+      ...customerForm,
+      creditLimit: parseFloat(customerForm.creditLimit) || 0
     };
 
     try {
@@ -2533,7 +2644,7 @@ export default function App() {
       });
       if (res.ok) {
         setCustomers([newCust, ...customers]);
-        setCustomerForm({ name: '', phone: '', location: '', eligibility: ['Paid'], salesTermId: '', paymentTerm: '' });
+        setCustomerForm({ name: '', phone: '', location: '', eligibility: ['Paid'], salesTermId: '', paymentTerm: '', tags: '', priceList: 'retail', kraPin: '', loyaltyPoints: 0, creditLimit: 0 });
         setNewCustomerModalOpen(false);
       } else {
         alert('Failed to add customer to database.');
@@ -4924,6 +5035,14 @@ export default function App() {
             color: #000000 !important;
             background: transparent !important;
           }
+          #printable-receipt img, #printable-payroll img {
+            visibility: visible !important;
+            display: block !important;
+            max-height: 55px !important;
+            max-width: 160px !important;
+            margin: 0 auto 6px auto !important;
+            object-fit: contain !important;
+          }
           #printable-payroll input[type=number] { appearance: none !important; -moz-appearance: textfield !important; border: 0 !important; box-shadow: none !important; }
           #printable-payroll input[type=number]::-webkit-inner-spin-button, #printable-payroll input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none !important; margin: 0 !important; }
           body:has(#printable-payroll) { }
@@ -5335,8 +5454,24 @@ export default function App() {
                         }
                       }} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs text-white" required>
                       <option value="">-- Choose Customer --</option>
-                      {(customers || []).map(c => <option key={c.id} value={c.name}>{c.name} (Eligible: {(c.eligibility || ['Paid']).join(', ')}{c.paymentTerm ? ` · ${c.paymentTerm}` : ''}{loyaltySettings.enabled ? ` · ${(parseFloat(c.loyaltyPoints) || 0).toLocaleString()} pts` : ''})</option>)}
+                      {(customers || []).map(c => <option key={c.id} value={c.name}>{c.name} (Eligible: {(c.eligibility || ['Paid']).join(', ')}{parseFloat(c.creditLimit) > 0 ? ` · Limit: ${shopProfile.currency} ${parseFloat(c.creditLimit).toLocaleString()}` : ''}{c.paymentTerm ? ` · ${c.paymentTerm}` : ''}{loyaltySettings.enabled ? ` · ${(parseFloat(c.loyaltyPoints) || 0).toLocaleString()} pts` : ''})</option>)}
                     </select>
+                    {posSelectedCustomer && (() => {
+                      const selCust = (customers || []).find(c => c.name === posSelectedCustomer);
+                      if (!selCust) return null;
+                      const cLimit = parseFloat(selCust.creditLimit) || 0;
+                      const outstandingDebt = (sales || [])
+                        .filter(s => (s.customerName === selCust.name || (selCust.id && s.customerId === selCust.id)) && (parseFloat(s.balanceDue) || 0) > 0.009)
+                        .reduce((sum, s) => sum + (parseFloat(s.balanceDue) || 0), 0);
+                      if (cLimit <= 0 && outstandingDebt <= 0) return null;
+                      const isOver = cLimit > 0 && outstandingDebt > cLimit;
+                      return (
+                        <div className={`mt-1.5 px-2.5 py-1.5 rounded-lg border flex flex-wrap items-center justify-between gap-1 text-[11px] ${isOver ? 'bg-rose-500/10 border-rose-500/40 text-rose-300' : 'bg-slate-900 border-slate-700 text-slate-300'}`}>
+                          <span>Credit Limit: <strong className="text-white">{cLimit > 0 ? `${shopProfile.currency} ${cLimit.toLocaleString()}` : 'Unlimited'}</strong></span>
+                          <span>Unpaid Balance: <strong className={outstandingDebt > 0 ? (isOver ? 'text-rose-400 font-bold' : 'text-amber-400') : 'text-emerald-400'}>{shopProfile.currency} {outstandingDebt.toLocaleString()}</strong></span>
+                        </div>
+                      );
+                    })()}
                     {loyaltySettings.enabled && posSelectedCustomer && (() => {
                       const selCust = (customers || []).find(c => c.name === posSelectedCustomer);
                       const availPts = parseFloat(selCust?.loyaltyPoints) || 0;
@@ -5610,6 +5745,7 @@ export default function App() {
                       <th className="py-2 px-3">Phone</th>
                       <th className="py-2 px-3">Location</th>
                       <th className="py-2 px-3">Eligibility</th>
+                      <th className="py-2 px-3">Max Credit Limit</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-700">
@@ -5628,6 +5764,15 @@ export default function App() {
                               <span key={el} className="bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded font-bold text-[10px]">{el}</span>
                             ))}
                           </div>
+                        </td>
+                        <td className="py-3 px-3">
+                          {parseFloat(cust.creditLimit) > 0 ? (
+                            <span className="text-emerald-400 font-bold tabular-nums">
+                              {shopProfile.currency} {parseFloat(cust.creditLimit).toLocaleString()}
+                            </span>
+                          ) : (
+                            <span className="text-slate-500 text-[11px]">Unlimited (0)</span>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -8825,11 +8970,67 @@ export default function App() {
                 {settingsSubTab === 'profile' && (
                   <>
 {/* Top Box: Business Profile Setup */}
-            <div className="bg-slate-900 p-5 rounded-xl border border-emerald-500/30 space-y-3">
-              <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
-                <Building className="w-4 h-4 text-emerald-400" />
-                <h4 className="text-xs font-bold text-white uppercase tracking-wider">Business Profile Setup</h4>
+            <div className="bg-slate-900 p-5 rounded-xl border border-emerald-500/30 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                <div className="flex items-center gap-2">
+                  <Building className="w-4 h-4 text-emerald-400" />
+                  <h4 className="text-xs font-bold text-white uppercase tracking-wider">Business Profile Setup</h4>
+                </div>
+                <span className="text-[10px] text-slate-400">Printed on receipts, invoices & payslips</span>
               </div>
+
+              {/* Business Logo Upload Section */}
+              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    {shopProfile.logo ? (
+                      <div className="bg-white/5 p-2 rounded-lg border border-slate-700 flex items-center justify-center h-16 w-24 shrink-0">
+                        <img src={shopProfile.logo} alt="Business Logo" className="max-h-12 max-w-[80px] object-contain" />
+                      </div>
+                    ) : (
+                      <div className="h-16 w-24 rounded-lg border-2 border-dashed border-slate-700 flex flex-col items-center justify-center text-slate-500 bg-slate-900/50 shrink-0">
+                        <Building className="w-5 h-5 mb-1 text-slate-600" />
+                        <span className="text-[9px]">No Logo</span>
+                      </div>
+                    )}
+                    <div>
+                      <label className="text-xs font-semibold text-white block">Business Logo</label>
+                      <p className="text-[10px] text-slate-400">Visible on printed receipts, invoices & documents. Automatically compressed into database.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label className="cursor-pointer px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded text-xs flex items-center gap-1.5 transition-colors">
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>{shopProfile.logo ? 'Change Logo' : 'Upload Logo'}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          try {
+                            const compressed = await compressLogoImage(file);
+                            setShopProfile(prev => ({ ...prev, logo: compressed }));
+                          } catch (err) {
+                            alert('Could not process image: ' + (err.message || 'unknown error'));
+                          }
+                        }}
+                      />
+                    </label>
+                    {shopProfile.logo && (
+                      <button
+                        type="button"
+                        onClick={() => setShopProfile(prev => ({ ...prev, logo: '' }))}
+                        className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded text-xs font-semibold"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                 <div>
                   <label className="text-slate-400 block mb-1">Shop Name</label>
@@ -8851,8 +9052,58 @@ export default function App() {
                   <label className="text-slate-400 block mb-1">Location / Stall Address</label>
                   <input type="text" value={shopProfile.location} onChange={e => setShopProfile({...shopProfile, location: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" />
                 </div>
+
+                {/* Customer Credit Limit Policy Configuration */}
+                <div className="sm:col-span-2 bg-slate-950 p-3.5 rounded-lg border border-slate-800 space-y-2 mt-1">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                      <label className="text-xs font-semibold text-white">Credit Exceeded Enforcement Policy</label>
+                    </div>
+                    <span className="text-[10px] text-emerald-400 font-semibold">{creditPolicy === 'stop' ? '🛑 Stop Sale (Block)' : '⚠️ Warning Alert'}</span>
+                  </div>
+                  <p className="text-[10px] text-slate-400">Choose action when an eligible customer exceeds their set Max Credit Limit during POS sale checkout.</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                    <label className={`flex items-start gap-2.5 p-2.5 rounded-lg border cursor-pointer transition-colors ${creditPolicy === 'stop' ? 'bg-rose-500/10 border-rose-500/50 text-white' : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'}`}>
+                      <input
+                        type="radio"
+                        name="bizProfileCreditPolicy"
+                        value="stop"
+                        checked={creditPolicy === 'stop'}
+                        onChange={() => {
+                          setCreditPolicy('stop');
+                          setShopProfile(prev => ({ ...prev, creditPolicy: 'stop' }));
+                          saveTenantSettingsPartial({ creditPolicy: 'stop' });
+                        }}
+                        className="mt-0.5 text-rose-500"
+                      />
+                      <div>
+                        <span className="font-bold text-xs block text-rose-400">🛑 Stop Sale (Strict Block)</span>
+                        <span className="text-[10px] text-slate-400 block mt-0.5">Disallow completing sale until debt is settled below limit.</span>
+                      </div>
+                    </label>
+                    <label className={`flex items-start gap-2.5 p-2.5 rounded-lg border cursor-pointer transition-colors ${creditPolicy === 'warn' ? 'bg-amber-500/10 border-amber-500/50 text-white' : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'}`}>
+                      <input
+                        type="radio"
+                        name="bizProfileCreditPolicy"
+                        value="warn"
+                        checked={creditPolicy === 'warn'}
+                        onChange={() => {
+                          setCreditPolicy('warn');
+                          setShopProfile(prev => ({ ...prev, creditPolicy: 'warn' }));
+                          saveTenantSettingsPartial({ creditPolicy: 'warn' });
+                        }}
+                        className="mt-0.5 text-amber-500"
+                      />
+                      <div>
+                        <span className="font-bold text-xs block text-amber-400">⚠️ Give Warning Alert & Continue</span>
+                        <span className="text-[10px] text-slate-400 block mt-0.5">Show warning dialog with debt details and prompt cashier to proceed.</span>
+                      </div>
+                    </label>
+                  </div>
+                </div>
               </div>
-              <button onClick={handleSaveShopProfile} className="px-4 py-2 bg-emerald-500 text-slate-950 font-bold rounded text-xs">Save Business Profile</button>
+              <button onClick={handleSaveShopProfile} className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded text-xs transition-colors">Save Business Profile</button>
             </div>
                   </>
                 )}
@@ -9117,6 +9368,56 @@ export default function App() {
                             <span className="text-emerald-400">Edit ➔</span>
                           </div>
                         ))}
+                      </div>
+                    </div>
+
+                    {/* Credit Limit Enforcement Policy Box */}
+                    <div className="bg-slate-900 p-5 rounded-xl border border-slate-700 space-y-3">
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-400" />
+                          <h4 className="text-xs font-bold text-white uppercase tracking-wider">Credit Limit Enforcement Policy</h4>
+                        </div>
+                        <span className="text-[10px] text-emerald-400 font-semibold">{creditPolicy === 'stop' ? '🛑 Stop Sale (Block)' : '⚠️ Warning Alert'}</span>
+                      </div>
+                      <p className="text-[10px] text-slate-400">Select business action when an eligible customer exceeds their set Max Credit Limit during POS sale checkout.</p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                        <label className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition-colors ${creditPolicy === 'stop' ? 'bg-rose-500/10 border-rose-500/50 text-white' : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'}`}>
+                          <input
+                            type="radio"
+                            name="salesSettingsCreditPolicy"
+                            value="stop"
+                            checked={creditPolicy === 'stop'}
+                            onChange={() => {
+                              setCreditPolicy('stop');
+                              setShopProfile(prev => ({ ...prev, creditPolicy: 'stop' }));
+                              saveTenantSettingsPartial({ creditPolicy: 'stop' });
+                            }}
+                            className="mt-0.5 text-rose-500"
+                          />
+                          <div>
+                            <span className="font-bold text-xs block text-rose-400">🛑 Stop Sale (Strict Block)</span>
+                            <span className="text-[10px] text-slate-400 block mt-0.5">Completely aborts checkout if total outstanding debt exceeds customer max credit limit.</span>
+                          </div>
+                        </label>
+                        <label className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition-colors ${creditPolicy === 'warn' ? 'bg-amber-500/10 border-amber-500/50 text-white' : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'}`}>
+                          <input
+                            type="radio"
+                            name="salesSettingsCreditPolicy"
+                            value="warn"
+                            checked={creditPolicy === 'warn'}
+                            onChange={() => {
+                              setCreditPolicy('warn');
+                              setShopProfile(prev => ({ ...prev, creditPolicy: 'warn' }));
+                              saveTenantSettingsPartial({ creditPolicy: 'warn' });
+                            }}
+                            className="mt-0.5 text-amber-500"
+                          />
+                          <div>
+                            <span className="font-bold text-xs block text-amber-400">⚠️ Give Warning Alert & Allow Selling</span>
+                            <span className="text-[10px] text-slate-400 block mt-0.5">Shows full credit balance details and prompts cashier to confirm override before proceeding.</span>
+                          </div>
+                        </label>
                       </div>
                     </div>
                   </>
@@ -9968,6 +10269,22 @@ export default function App() {
                   {salesTerms.map(t => <option key={t.id} value={t.id}>{t.name} ({t.type}{t.days ? `, ${t.days} days` : ''})</option>)}
                 </select>
               </div>
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-slate-400 block font-semibold text-xs">Max Credit Limit ({shopProfile.currency || 'KSh'})</label>
+                  <span className="text-[10px] text-slate-500">0 = Unlimited</span>
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="0"
+                  value={customerForm.creditLimit || ''}
+                  onChange={e => setCustomerForm({...customerForm, creditLimit: parseFloat(e.target.value) || 0})}
+                  className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs font-mono"
+                />
+                <p className="text-[10px] text-slate-500 mt-0.5">Maximum unpaid credit balance allowed before business policy triggers.</p>
+              </div>
               <button type="submit" className="w-full py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Save Customer</button>
             </form>
           </div>
@@ -10000,6 +10317,15 @@ export default function App() {
             <div className="overflow-y-auto flex-1 min-h-0 pr-1">
             <div id="printable-receipt" className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-3 text-xs text-slate-200">
               <div className="text-center border-b border-slate-800 pb-2">
+                {shopProfile.logo ? (
+                  <div className="flex justify-center mb-1.5">
+                    <img
+                      src={shopProfile.logo}
+                      alt={shopProfile.name}
+                      className="h-12 max-h-12 max-w-[150px] object-contain mx-auto"
+                    />
+                  </div>
+                ) : null}
                 <p className="font-bold text-white text-sm">{shopProfile.name}</p>
                 <p className="text-[10px] text-slate-400">{shopProfile.tagline}</p>
                 <p className="text-[10px] text-slate-400">{(branches || []).find(b => b.id === (lastCompletedSale.branchId || activeBranchId))?.name || shopProfile.location} | Tel: {shopProfile.phone}</p>
@@ -10471,6 +10797,22 @@ export default function App() {
                   <option value="">-- Select sales term --</option>
                   {salesTerms.map(t => <option key={t.id} value={t.id}>{t.name} ({t.type}{t.days ? `, ${t.days} days` : ''})</option>)}
                 </select>
+              </div>
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-slate-400 block font-semibold text-xs">Max Credit Limit ({shopProfile.currency || 'KSh'})</label>
+                  <span className="text-[10px] text-slate-500">0 = Unlimited</span>
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="0"
+                  value={selectedCustomer.creditLimit ?? 0}
+                  onChange={e => setSelectedCustomer({...selectedCustomer, creditLimit: parseFloat(e.target.value) || 0})}
+                  className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs font-mono"
+                />
+                <p className="text-[10px] text-slate-500 mt-0.5">Maximum unpaid credit balance allowed before business policy triggers.</p>
               </div>
               <div className="flex gap-2 pt-2">
                 {(isAdminUser || privileges.customers?.update) && (
@@ -11484,6 +11826,15 @@ export default function App() {
             </div>
             <div id="printable-payroll" className="space-y-3 text-xs">
               <div className="text-center border-b-2 border-slate-700 pb-3 mb-3 print:border-black">
+                {shopProfile.logo ? (
+                  <div className="flex justify-center mb-2">
+                    <img
+                      src={shopProfile.logo}
+                      alt={shopProfile.name}
+                      className="h-12 max-h-12 max-w-[150px] object-contain mx-auto print:block"
+                    />
+                  </div>
+                ) : null}
                 <h2 className="text-xl font-bold text-white print:text-black">{shopProfile.name}</h2>
                 {shopProfile.tagline && <p className="text-slate-300 print:text-black mt-1">{shopProfile.tagline}</p>}
                 <p className="text-slate-300 print:text-black mt-1">{shopProfile.location}{shopProfile.phone ? ` | ${shopProfile.phone}` : ''}</p>

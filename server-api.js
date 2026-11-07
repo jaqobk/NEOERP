@@ -225,6 +225,10 @@ export async function onRequest(context) {
         try { await env.DB.prepare(`ALTER TABLE sales ADD COLUMN ${col}`).run(); } catch (_) {}
       }
       try { await env.DB.prepare(`ALTER TABLE expenses ADD COLUMN paymentHistory TEXT`).run(); } catch (_) {}
+      try { await env.DB.prepare(`ALTER TABLE shop_profile ADD COLUMN logo TEXT`).run(); } catch (_) {}
+      try { await env.DB.prepare(`ALTER TABLE shop_profile ADD COLUMN creditPolicy TEXT DEFAULT 'warn'`).run(); } catch (_) {}
+      try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN creditLimit REAL DEFAULT 0`).run(); } catch (_) {}
+      try { await env.DB.prepare(`ALTER TABLE tenant_settings ADD COLUMN creditPolicy TEXT DEFAULT 'warn'`).run(); } catch (_) {}
       // Default tenant + backfill
       try {
         const def = await env.DB.prepare(`SELECT id FROM tenants WHERE id = ?`).bind('tenant-default').first();
@@ -1100,10 +1104,10 @@ globalThis.__neoSchemaReady = true;
         await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tenant_settings (
           id TEXT PRIMARY KEY, tenantId TEXT UNIQUE, paymentMethods TEXT, salesTerms TEXT,
           loyalty TEXT, etims TEXT, salesTargets TEXT, tasks TEXT, cashups TEXT, auditLog TEXT,
-          itemVariances TEXT, poApprovalLimit REAL DEFAULT 0, returnRequests TEXT, updatedAt INTEGER
+          itemVariances TEXT, poApprovalLimit REAL DEFAULT 0, returnRequests TEXT, creditPolicy TEXT DEFAULT 'warn', updatedAt INTEGER
         )`).run();
       } catch (_) {}
-      for (const col of ['tasks TEXT', 'cashups TEXT', 'auditLog TEXT', 'itemVariances TEXT', 'poApprovalLimit REAL DEFAULT 0', 'returnRequests TEXT']) {
+      for (const col of ['tasks TEXT', 'cashups TEXT', 'auditLog TEXT', 'itemVariances TEXT', 'poApprovalLimit REAL DEFAULT 0', 'returnRequests TEXT', 'creditPolicy TEXT DEFAULT \'warn\'']) {
         try { await env.DB.prepare(`ALTER TABLE tenant_settings ADD COLUMN ${col}`).run(); } catch (_) {}
       }
     };
@@ -2643,19 +2647,27 @@ globalThis.__neoSchemaReady = true;
         const eligibilityJson = JSON.stringify(body.eligibility || ['Paid']);
         const tid = auth.tenantId || 'tenant-default';
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN loyaltyPoints REAL DEFAULT 0`).run(); } catch (_) {}
+        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN creditLimit REAL DEFAULT 0`).run(); } catch (_) {}
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN salesTermId TEXT`).run(); } catch (_) {}
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN paymentTerm TEXT`).run(); } catch (_) {}
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN tags TEXT`).run(); } catch (_) {}
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN priceList TEXT`).run(); } catch (_) {}
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN kraPin TEXT`).run(); } catch (_) {}
+        const creditLimitNum = parseFloat(body.creditLimit) || 0;
         try {
           await env.DB.prepare(
-            `INSERT INTO customers (id, name, phone, location, eligibility, loyaltyPoints, salesTermId, paymentTerm, tags, priceList, kraPin, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).bind(body.id, body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', tid).run();
+            `INSERT INTO customers (id, name, phone, location, eligibility, loyaltyPoints, creditLimit, salesTermId, paymentTerm, tags, priceList, kraPin, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(body.id, body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, creditLimitNum, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', tid).run();
         } catch (_) {
-          await env.DB.prepare(
-            `INSERT INTO customers (id, name, phone, location, eligibility, tenantId) VALUES (?, ?, ?, ?, ?, ?)`
-          ).bind(body.id, body.name, body.phone, body.location, eligibilityJson, tid).run();
+          try {
+            await env.DB.prepare(
+              `INSERT INTO customers (id, name, phone, location, eligibility, loyaltyPoints, salesTermId, paymentTerm, tags, priceList, kraPin, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(body.id, body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', tid).run();
+          } catch (__) {
+            await env.DB.prepare(
+              `INSERT INTO customers (id, name, phone, location, eligibility, tenantId) VALUES (?, ?, ?, ?, ?, ?)`
+            ).bind(body.id, body.name, body.phone, body.location, eligibilityJson, tid).run();
+          }
         }
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
@@ -2664,19 +2676,27 @@ globalThis.__neoSchemaReady = true;
         const eligibilityJson = JSON.stringify(body.eligibility || ['Paid']);
         const tid = auth.tenantId || 'tenant-default';
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN loyaltyPoints REAL DEFAULT 0`).run(); } catch (_) {}
+        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN creditLimit REAL DEFAULT 0`).run(); } catch (_) {}
+        const creditLimitNum = parseFloat(body.creditLimit) || 0;
         try {
           await env.DB.prepare(
-            `UPDATE customers SET name = ?, phone = ?, location = ?, eligibility = ?, loyaltyPoints = ?, salesTermId = ?, paymentTerm = ?, tags = ?, priceList = ?, kraPin = ? WHERE id = ? AND tenantId = ?`
-          ).bind(body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', id, tid).run();
+            `UPDATE customers SET name = ?, phone = ?, location = ?, eligibility = ?, loyaltyPoints = ?, creditLimit = ?, salesTermId = ?, paymentTerm = ?, tags = ?, priceList = ?, kraPin = ? WHERE id = ? AND tenantId = ?`
+          ).bind(body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, creditLimitNum, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', id, tid).run();
         } catch (_) {
           try {
             await env.DB.prepare(
-              `UPDATE customers SET name = ?, phone = ?, location = ?, eligibility = ?, loyaltyPoints = ? WHERE id = ? AND tenantId = ?`
-            ).bind(body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, id, tid).run();
+              `UPDATE customers SET name = ?, phone = ?, location = ?, eligibility = ?, loyaltyPoints = ?, salesTermId = ?, paymentTerm = ?, tags = ?, priceList = ?, kraPin = ? WHERE id = ? AND tenantId = ?`
+            ).bind(body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', id, tid).run();
           } catch (__) {
-            await env.DB.prepare(
-              `UPDATE customers SET name = ?, phone = ?, location = ?, eligibility = ? WHERE id = ? AND tenantId = ?`
-            ).bind(body.name, body.phone, body.location, eligibilityJson, id, tid).run();
+            try {
+              await env.DB.prepare(
+                `UPDATE customers SET name = ?, phone = ?, location = ?, eligibility = ?, loyaltyPoints = ? WHERE id = ? AND tenantId = ?`
+              ).bind(body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, id, tid).run();
+            } catch (___) {
+              await env.DB.prepare(
+                `UPDATE customers SET name = ?, phone = ?, location = ?, eligibility = ? WHERE id = ? AND tenantId = ?`
+              ).bind(body.name, body.phone, body.location, eligibilityJson, id, tid).run();
+            }
           }
         }
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
@@ -3782,33 +3802,37 @@ globalThis.__neoSchemaReady = true;
         const currency = String(body.currency || 'KSh').trim();
         const phone = String(body.phone || '').trim();
         const location = String(body.location || '').trim();
+        const logo = body.logo !== undefined ? String(body.logo || '').trim() : '';
+        const creditPolicy = body.creditPolicy === 'stop' ? 'stop' : (body.creditPolicy === 'warn' ? 'warn' : 'warn');
+        try { await env.DB.prepare(`ALTER TABLE shop_profile ADD COLUMN logo TEXT`).run(); } catch (_) {}
+        try { await env.DB.prepare(`ALTER TABLE shop_profile ADD COLUMN creditPolicy TEXT DEFAULT 'warn'`).run(); } catch (_) {}
         let saved = false;
         try {
-          const existing = await env.DB.prepare(`SELECT id FROM shop_profile WHERE tenantId = ? OR id = ? LIMIT 1`).bind(tid, tid).first();
+          const existing = await env.DB.prepare(`SELECT id, logo, creditPolicy FROM shop_profile WHERE tenantId = ? OR id = ? LIMIT 1`).bind(tid, tid).first();
           if (existing) {
+            const finalLogo = body.logo !== undefined ? logo : (existing.logo || '');
+            const finalPolicy = body.creditPolicy !== undefined ? creditPolicy : (existing.creditPolicy || 'warn');
             await env.DB.prepare(
-              `UPDATE shop_profile SET name = ?, tagline = ?, currency = ?, phone = ?, location = ?, tenantId = ? WHERE id = ? OR tenantId = ?`
-            ).bind(name, tagline, currency, phone, location, tid, existing.id, tid).run();
+              `UPDATE shop_profile SET name = ?, tagline = ?, currency = ?, phone = ?, location = ?, logo = ?, creditPolicy = ?, tenantId = ? WHERE id = ? OR tenantId = ?`
+            ).bind(name, tagline, currency, phone, location, finalLogo, finalPolicy, tid, existing.id, tid).run();
             saved = true;
           } else {
             await env.DB.prepare(
-              `INSERT INTO shop_profile (id, name, tagline, currency, phone, location, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?)`
-            ).bind(String(tid), name, tagline, currency, phone, location, tid).run();
+              `INSERT INTO shop_profile (id, name, tagline, currency, phone, location, logo, creditPolicy, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(String(tid), name, tagline, currency, phone, location, logo, creditPolicy, tid).run();
             saved = true;
           }
         } catch (e1) {
           try {
             await env.DB.prepare(
-              `INSERT INTO shop_profile (id, name, tagline, currency, phone, location, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(id) DO UPDATE SET name = excluded.name, tagline = excluded.tagline, currency = excluded.currency, phone = excluded.phone, location = excluded.location, tenantId = excluded.tenantId`
-            ).bind(String(tid), name, tagline, currency, phone, location, tid).run();
+              `UPDATE shop_profile SET name = ?, tagline = ?, currency = ?, phone = ?, location = ?, tenantId = ? WHERE id = ? OR tenantId = ?`
+            ).bind(name, tagline, currency, phone, location, tid, String(tid), tid).run();
             saved = true;
           } catch (e2) {
             try {
               await env.DB.prepare(
-                `INSERT INTO shop_profile (id, name, tagline, currency, phone, location) VALUES (1, ?, ?, ?, ?, ?)
-                 ON CONFLICT(id) DO UPDATE SET name = ?, tagline = ?, currency = ?, phone = ?, location = ?`
-              ).bind(name, tagline, currency, phone, location, name, tagline, currency, phone, location).run();
+                `INSERT INTO shop_profile (id, name, tagline, currency, phone, location, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?)`
+              ).bind(String(tid), name, tagline, currency, phone, location, tid).run();
               saved = true;
             } catch (_) {}
           }
@@ -3818,7 +3842,7 @@ globalThis.__neoSchemaReady = true;
           try { await env.DB.prepare(`UPDATE tenants SET name = ? WHERE id = ?`).bind(name, tid).run(); } catch (_) {}
         }
         if (!saved) return json({ error: 'Failed to save shop profile' }, 500);
-        const profile = { id: String(tid), name, tagline, currency, phone, location, tenantId: tid };
+        const profile = { id: String(tid), name, tagline, currency, phone, location, logo, creditPolicy, tenantId: tid };
         return json({ success: true, name, profile });
       }
       if (request.method === 'GET') {
@@ -5128,6 +5152,7 @@ globalThis.__neoSchemaReady = true;
         const itemVariances = body.itemVariances != null ? (typeof body.itemVariances === 'string' ? body.itemVariances : JSON.stringify(body.itemVariances)) : null;
         const poApprovalLimit = body.poApprovalLimit !== undefined && body.poApprovalLimit !== null ? Math.max(0, parseFloat(body.poApprovalLimit) || 0) : null;
         const returnRequests = body.returnRequests != null ? (typeof body.returnRequests === 'string' ? body.returnRequests : JSON.stringify(body.returnRequests)) : null;
+        const creditPolicy = body.creditPolicy !== undefined ? (body.creditPolicy === 'stop' ? 'stop' : 'warn') : null;
         const existing = await env.DB.prepare(`SELECT * FROM tenant_settings WHERE tenantId = ? LIMIT 1`).bind(tid).first();
         if (existing) {
           try {
@@ -5144,9 +5169,10 @@ globalThis.__neoSchemaReady = true;
                 itemVariances = COALESCE(?, itemVariances),
                 poApprovalLimit = COALESCE(?, poApprovalLimit),
                 returnRequests = COALESCE(?, returnRequests),
+                creditPolicy = COALESCE(?, creditPolicy),
                 updatedAt = ?
                WHERE tenantId = ?`
-            ).bind(pm, st, loy, et, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests, Date.now(), tid).run();
+            ).bind(pm, st, loy, et, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests, creditPolicy, Date.now(), tid).run();
           } catch (_) {
             await env.DB.prepare(
               `UPDATE tenant_settings SET
@@ -5165,9 +5191,9 @@ globalThis.__neoSchemaReady = true;
         } else {
           try {
             await env.DB.prepare(
-              `INSERT INTO tenant_settings (id, tenantId, paymentMethods, salesTerms, loyalty, etims, salesTargets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests, updatedAt)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            ).bind(tid, tid, pm, st, loy, et, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit ?? 0, returnRequests, Date.now()).run();
+              `INSERT INTO tenant_settings (id, tenantId, paymentMethods, salesTerms, loyalty, etims, salesTargets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests, creditPolicy, updatedAt)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(tid, tid, pm, st, loy, et, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit ?? 0, returnRequests, creditPolicy || 'warn', Date.now()).run();
           } catch (_) {
             await env.DB.prepare(
               `INSERT INTO tenant_settings (id, tenantId, paymentMethods, salesTerms, loyalty, etims, salesTargets, tasks, cashups, auditLog, updatedAt)
