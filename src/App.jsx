@@ -3695,8 +3695,8 @@ export default function App() {
   if (!isLoggedIn) {
     const showPin = typeof window !== 'undefined' && window.__neo_show_pin;
     return (
-      <div className="min-h-screen bg-[#0b1220] text-slate-100 flex items-center justify-center p-4">
-        <div className="w-full max-w-[400px] bg-[#141c2b] border border-slate-800/80 rounded-2xl shadow-2xl p-8 space-y-6">
+      <div className="min-h-screen bg-[#0b1220] text-slate-100 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+        <div className="w-full max-w-[420px] bg-[#141c2b] border border-slate-800/80 rounded-2xl shadow-2xl p-5 sm:p-8 space-y-6 max-h-[92vh] overflow-y-auto my-auto">
           <div className="text-center space-y-3">
             <div className="mx-auto w-14 h-14 rounded-2xl bg-gradient-to-br from-emerald-500 to-emerald-700 flex items-center justify-center shadow-lg shadow-emerald-500/20">
               <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
@@ -4860,8 +4860,8 @@ export default function App() {
                   </tbody>
                 </table>
                 {selectedPlatformPayment && (
-                  <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-[80] p-4" onClick={() => setSelectedPlatformPayment(null)}>
-                    <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-3 shadow-2xl" onClick={e => e.stopPropagation()}>
+                  <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-[80] p-3 sm:p-4 overflow-y-auto" onClick={() => setSelectedPlatformPayment(null)}>
+                    <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-3 shadow-2xl max-h-[90vh] overflow-y-auto my-auto" onClick={e => e.stopPropagation()}>
                       <div className="flex justify-between items-center border-b border-slate-800 pb-2">
                         <h4 className="font-bold text-white text-sm">Edit payment</h4>
                         <button type="button" onClick={() => setSelectedPlatformPayment(null)} className="text-slate-400">✕</button>
@@ -4920,8 +4920,8 @@ export default function App() {
           )}
 
           {selectedPlatformShop && (
-            <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-[80] p-4" onClick={() => setSelectedPlatformShop(null)}>
-              <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-3" onClick={e => e.stopPropagation()}>
+            <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-[80] p-3 sm:p-4 overflow-y-auto" onClick={() => setSelectedPlatformShop(null)}>
+              <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-3 shadow-2xl max-h-[90vh] overflow-y-auto my-auto" onClick={e => e.stopPropagation()}>
                 <div className="flex justify-between border-b border-slate-800 pb-2">
                   <h4 className="font-bold text-white text-sm">Edit shop: {selectedPlatformShop.name}</h4>
                   <button type="button" onClick={() => setSelectedPlatformShop(null)} className="text-slate-400">✕</button>
@@ -6520,8 +6520,8 @@ export default function App() {
 
             {/* New Supplier Modal */}
             {newSupplierModalOpen && (
-              <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-                <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+              <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+                <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
                   <div className="flex justify-between items-center border-b border-slate-800 pb-2">
                     <h4 className="font-bold text-white text-sm">Add New Supplier</h4>
                     <button onClick={() => setNewSupplierModalOpen(false)} className="text-slate-400">✕</button>
@@ -6564,8 +6564,8 @@ export default function App() {
 
             {/* Supplier Edit Modal */}
             {selectedSupplier && (
-              <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-                <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+              <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+                <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
                   <div className="flex justify-between items-center border-b border-slate-800 pb-2">
                     <h4 className="font-bold text-white text-sm">Edit Supplier: {selectedSupplier.name}</h4>
                     <button onClick={() => setSelectedSupplier(null)} className="text-slate-400">✕</button>
@@ -6615,8 +6615,8 @@ export default function App() {
 
             {/* New Purchase Order Modal with Dynamic Cost & Amount Calculation */}
             {newPOModalOpen && (
-              <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-                <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+              <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+                <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
                   <div className="flex justify-between items-center border-b border-slate-800 pb-2">
                     <h4 className="font-bold text-white text-sm">Create Purchase Order</h4>
                     <button onClick={() => setNewPOModalOpen(false)} className="text-slate-400">✕</button>
@@ -6793,8 +6793,8 @@ export default function App() {
             {/* Partial / Full Payment Modal */}
             
             {selectedPO && !poPaymentModalOpen && !purchaseReturnModalOpen && (
-              <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-                <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+              <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+                <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
                   <div className="flex justify-between items-center border-b border-slate-800 pb-2">
                     <h4 className="font-bold text-white text-sm">Purchase Order {selectedPO.id}</h4>
                     <button onClick={() => setSelectedPO(null)} className="text-slate-400">✕</button>
@@ -6927,8 +6927,8 @@ export default function App() {
             )}
 
             {poPaymentModalOpen && selectedPO && (
-              <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-                <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+              <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+                <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
                   <div className="flex justify-between items-center border-b border-slate-800 pb-2">
                     <h4 className="font-bold text-white text-sm">Make Payment for PO: {selectedPO.id}</h4>
                     <button onClick={() => setPoPaymentModalOpen(false)} className="text-slate-400">✕</button>
@@ -10075,8 +10075,8 @@ export default function App() {
       {/* --- MODALS --- */}
       {/* User Profile Modal */}
       {userProfileModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-[60] p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-[60] p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2"><h4 className="font-bold text-white text-sm">My User Profile</h4><button onClick={() => setUserProfileModalOpen(false)} className="text-slate-400">✕</button></div>
             <form className="space-y-3 text-xs" onSubmit={async e => {
               e.preventDefault(); if (!currentUser) return;
@@ -10116,41 +10116,40 @@ export default function App() {
               <p className="text-slate-500">Role: {currentUser?.role || '—'}</p>
               <div className="flex gap-2"><button type="submit" className="flex-1 py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Save Profile</button><button type="button" onClick={() => { setUserProfileModalOpen(false); setChangePasswordModalOpen(true); }} className="flex-1 py-2.5 bg-slate-700 text-white font-bold rounded">Change Password</button></div>
             </form>
+            <div className="space-y-2 border-t border-slate-800 pt-3">
+              <p className="text-[10px] font-bold text-slate-400 uppercase">Change PIN</p>
+              <input type="password" placeholder="Current PIN" value={profilePinCurrent} onChange={e => setProfilePinCurrent(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs" />
+              <input type="password" placeholder="New PIN (min 4)" value={profilePinNew} onChange={e => setProfilePinNew(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs" />
+              <input type="password" placeholder="Confirm new PIN" value={profilePinConfirm} onChange={e => setProfilePinConfirm(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs" />
+              {profilePinNew && <p className={`text-[10px] ${pinStrength(profilePinNew).score >= 2 ? 'text-emerald-400' : 'text-amber-400'}`}>Strength: {pinStrength(profilePinNew).label}</p>}
+              <button type="button" onClick={async () => {
+                if (profilePinNew !== profilePinConfirm) { alert('New PIN and confirm do not match.'); return; }
+                const st = pinStrength(profilePinNew);
+                if (!st.ok) { alert(st.label); return; }
+                if (!window.confirm('Update your PIN now?')) return;
+                try {
+                  const res = await apiFetch('/api/change-pin', {
+                    method: 'POST',
+                    body: JSON.stringify({ currentPin: profilePinCurrent, newPin: profilePinNew })
+                  });
+                  const data = await res.json().catch(() => ({}));
+                  if (!res.ok) { alert(data.error || 'Could not update PIN'); return; }
+                  setProfilePinCurrent(''); setProfilePinNew(''); setProfilePinConfirm('');
+                  logAudit('update', 'user', 'PIN changed');
+                  alert('PIN updated securely on server.');
+                } catch (e) {
+                  alert('Network error updating PIN.');
+                }
+              }} className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded">Update PIN</button>
+            </div>
           </div>
-              <div className="space-y-2 border-t border-slate-800 pt-3">
-                <p className="text-[10px] font-bold text-slate-400 uppercase">Change PIN</p>
-                <input type="password" placeholder="Current PIN" value={profilePinCurrent} onChange={e => setProfilePinCurrent(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs" />
-                <input type="password" placeholder="New PIN (min 4)" value={profilePinNew} onChange={e => setProfilePinNew(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs" />
-                <input type="password" placeholder="Confirm new PIN" value={profilePinConfirm} onChange={e => setProfilePinConfirm(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs" />
-                {profilePinNew && <p className={`text-[10px] ${pinStrength(profilePinNew).score >= 2 ? 'text-emerald-400' : 'text-amber-400'}`}>Strength: {pinStrength(profilePinNew).label}</p>}
-                <button type="button" onClick={async () => {
-                  if (profilePinNew !== profilePinConfirm) { alert('New PIN and confirm do not match.'); return; }
-                  const st = pinStrength(profilePinNew);
-                  if (!st.ok) { alert(st.label); return; }
-                  if (!window.confirm('Update your PIN now?')) return;
-                  try {
-                    const res = await apiFetch('/api/change-pin', {
-                      method: 'POST',
-                      body: JSON.stringify({ currentPin: profilePinCurrent, newPin: profilePinNew })
-                    });
-                    const data = await res.json().catch(() => ({}));
-                    if (!res.ok) { alert(data.error || 'Could not update PIN'); return; }
-                    setProfilePinCurrent(''); setProfilePinNew(''); setProfilePinConfirm('');
-                    logAudit('update', 'user', 'PIN changed');
-                    alert('PIN updated securely on server.');
-                  } catch (e) {
-                    alert('Network error updating PIN.');
-                  }
-                }} className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded">Update PIN</button>
-              </div>
-
         </div>
       )}
 
       {/* Self Change Password Modal */}
       {changePasswordModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Change My Password / PIN</h4>
               <button onClick={() => setChangePasswordModalOpen(false)} className="text-slate-400">✕</button>
@@ -10205,8 +10204,8 @@ export default function App() {
 
       {/* Add New Customer Modal */}
       {newCustomerModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Add New Customer</h4>
               <button onClick={() => setNewCustomerModalOpen(false)} className="text-slate-400">✕</button>
@@ -10293,8 +10292,8 @@ export default function App() {
 
       {/* Receipt Modal */}
       {receiptModalOpen && lastCompletedSale && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md shadow-2xl flex flex-col max-h-[90vh] space-y-3">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md shadow-2xl flex flex-col max-h-[90vh] space-y-3 my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2 print:hidden shrink-0">
               <h4 className="font-bold text-white text-sm">Sale Receipt #{lastCompletedSale.invoiceNo || lastCompletedSale.id}</h4>
               <div className="flex gap-2 items-center">
@@ -10401,8 +10400,8 @@ export default function App() {
       )}
 
       {addUserModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Add New User</h4>
               <button onClick={() => setAddUserModalOpen(false)} className="text-slate-400">✕</button>
@@ -10461,8 +10460,8 @@ export default function App() {
       )}
 
       {addRoleModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Add New Role</h4>
               <button onClick={() => setAddRoleModalOpen(false)} className="text-slate-400">✕</button>
@@ -10480,8 +10479,8 @@ export default function App() {
       )}
 
       {addCategoryModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Add New Item Category</h4>
               <button onClick={() => setAddCategoryModalOpen(false)} className="text-slate-400">✕</button>
@@ -10505,8 +10504,8 @@ export default function App() {
       )}
 
       {addStatusModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Add New Item Status</h4>
               <button onClick={() => setAddStatusModalOpen(false)} className="text-slate-400">✕</button>
@@ -10530,8 +10529,8 @@ export default function App() {
       )}
 
       {newItemModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-lg shadow-2xl max-h-[90vh] overflow-y-auto space-y-4">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-lg shadow-2xl max-h-[90vh] overflow-y-auto space-y-4 my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Add New Item</h4>
               <button type="button" onClick={() => setNewItemModalOpen(false)} className="text-slate-400">✕</button>
@@ -10645,8 +10644,8 @@ export default function App() {
       )}
 
       {selectedInventoryItem && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Edit Inventory Item: {selectedInventoryItem.name}</h4>
               <button onClick={() => setSelectedInventoryItem(null)} className="text-slate-400">✕</button>
@@ -10752,8 +10751,8 @@ export default function App() {
       )}
 
       {selectedCustomer && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Edit Customer: {selectedCustomer.name}</h4>
               <button onClick={() => setSelectedCustomer(null)} className="text-slate-400">✕</button>
@@ -10831,8 +10830,8 @@ export default function App() {
       )}
 
       {selectedExpenseItem && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Edit Expense Item</h4>
               <button onClick={() => setSelectedExpenseItem(null)} className="text-slate-400">✕</button>
@@ -10909,8 +10908,8 @@ export default function App() {
       )}
 
       {selectedSaleItem && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-lg shadow-2xl max-h-[90vh] flex flex-col">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-lg shadow-2xl max-h-[90vh] flex flex-col my-auto">
             <div className="overflow-y-auto flex-1 min-h-0 space-y-4 pr-1">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Transaction Details & Payment Update: #{selectedSaleItem.id}</h4>
@@ -11118,8 +11117,8 @@ export default function App() {
 
       {/* Admin User Edit Modal */}
       {selectedUser && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Edit User: {selectedUser.name} (Admin Override)</h4>
               <button onClick={() => setSelectedUser(null)} className="text-slate-400">✕</button>
@@ -11162,8 +11161,8 @@ export default function App() {
       )}
 
       {selectedRole && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-lg space-y-4 max-h-[90vh] overflow-y-auto shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-lg space-y-4 max-h-[90vh] overflow-y-auto shadow-2xl my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Configure Privileges for Role: {selectedRole.name}</h4>
               <button onClick={() => setSelectedRole(null)} className="text-slate-400">✕</button>
@@ -11318,8 +11317,8 @@ export default function App() {
       )}
 
       {selectedCategory && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Edit Category</h4>
               <button onClick={() => setSelectedCategory(null)} className="text-slate-400">✕</button>
@@ -11336,8 +11335,8 @@ export default function App() {
       )}
 
       {addExpenseCategoryModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Add New Expense Category</h4>
               <button onClick={() => setAddExpenseCategoryModalOpen(false)} className="text-slate-400">✕</button>
@@ -11369,8 +11368,8 @@ export default function App() {
       )}
 
       {selectedExpenseCategory && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-55 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-55 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Edit Expense Category</h4>
               <button onClick={() => setSelectedExpenseCategory(null)} className="text-slate-400">✕</button>
@@ -11394,8 +11393,8 @@ export default function App() {
       )}
 
       {selectedItemStatus && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Edit Item Status</h4>
               <button onClick={() => setSelectedItemStatus(null)} className="text-slate-400">✕</button>
@@ -11420,8 +11419,8 @@ export default function App() {
 
       {/* Employee Modal */}
       {employeeModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">{selectedEmployee ? 'Edit Employee' : 'Add Employee'}</h4>
               <button onClick={() => { setEmployeeModalOpen(false); setSelectedEmployee(null); }} className="text-slate-400">✕</button>
@@ -11498,8 +11497,8 @@ export default function App() {
 
       {/* Leave Request Modal */}
       {leaveModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">New Leave Request</h4>
               <button onClick={() => setLeaveModalOpen(false)} className="text-slate-400">✕</button>
@@ -11541,8 +11540,8 @@ export default function App() {
       {/* Payroll Modal */}
       {/* Sales Return Modal */}
       {salesReturnModalOpen && salesReturnSale && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Sales Return — #{salesReturnSale.id}</h4>
               <button onClick={() => { setSalesReturnModalOpen(false); setSalesReturnSale(null); }} className="text-slate-400">✕</button>
@@ -11602,8 +11601,8 @@ export default function App() {
 
       {/* Purchase Return Modal */}
       {purchaseReturnModalOpen && purchaseReturnPO && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Purchase Return — {purchaseReturnPO.id}</h4>
               <button onClick={() => { setPurchaseReturnModalOpen(false); setPurchaseReturnPO(null); }} className="text-slate-400">✕</button>
@@ -11657,8 +11656,8 @@ export default function App() {
       
       {/* Leave edit modal */}
       {selectedLeave && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Edit Leave Request</h4>
               <button onClick={() => setSelectedLeave(null)} className="text-slate-400">✕</button>
@@ -11700,9 +11699,9 @@ export default function App() {
       )}
 
       {/* Payment method modal */}
-                  {selectedBranch && (
-              <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-[70] p-4" onClick={() => setSelectedBranch(null)}>
-                <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-3 shadow-2xl" onClick={e => e.stopPropagation()}>
+      {selectedBranch && (
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-[70] p-3 sm:p-4 overflow-y-auto" onClick={() => setSelectedBranch(null)}>
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-3 shadow-2xl max-h-[90vh] overflow-y-auto my-auto" onClick={e => e.stopPropagation()}>
                   <div className="flex justify-between items-center border-b border-slate-800 pb-2">
                     <h4 className="font-bold text-white text-sm">Edit location</h4>
                     <button type="button" onClick={() => setSelectedBranch(null)} className="text-slate-400">✕</button>
@@ -11741,9 +11740,9 @@ export default function App() {
             )}
 
 
-            {paymentMethodModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+      {paymentMethodModalOpen && (
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">{selectedPaymentMethod ? 'Edit Payment Method' : 'Add Payment Method'}</h4>
               <button onClick={() => setPaymentMethodModalOpen(false)} className="text-slate-400">✕</button>
@@ -11777,8 +11776,8 @@ export default function App() {
 
       {/* Sales term modal */}
       {salesTermModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">{selectedSalesTerm ? 'Edit Sales Term' : 'Add Sales Term'}</h4>
               <button onClick={() => setSalesTermModalOpen(false)} className="text-slate-400">✕</button>
@@ -11818,8 +11817,8 @@ export default function App() {
       )}
 
       {selectedPayroll && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4 print:bg-white print:static">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto print:bg-white print:text-black print:border-0 print:shadow-none">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto print:bg-white print:static">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto print:bg-white print:text-black print:border-0 print:shadow-none">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2 print:border-slate-300">
               <h4 className="font-bold text-white text-sm print:text-black">Payslip — {selectedPayroll.employeeName}</h4>
               <button onClick={() => setSelectedPayroll(null)} className="text-slate-400 print:hidden">✕</button>
@@ -11904,8 +11903,8 @@ export default function App() {
       )}
 
       {payrollModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
               <h4 className="font-bold text-white text-sm">Generate Payroll</h4>
               <button onClick={() => setPayrollModalOpen(false)} className="text-slate-400">✕</button>
