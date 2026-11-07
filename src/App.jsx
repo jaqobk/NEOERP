@@ -9052,56 +9052,6 @@ export default function App() {
                   <label className="text-slate-400 block mb-1">Location / Stall Address</label>
                   <input type="text" value={shopProfile.location} onChange={e => setShopProfile({...shopProfile, location: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" />
                 </div>
-
-                {/* Customer Credit Limit Policy Configuration */}
-                <div className="sm:col-span-2 bg-slate-950 p-3.5 rounded-lg border border-slate-800 space-y-2 mt-1">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5">
-                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                      <label className="text-xs font-semibold text-white">Credit Exceeded Enforcement Policy</label>
-                    </div>
-                    <span className="text-[10px] text-emerald-400 font-semibold">{creditPolicy === 'stop' ? '🛑 Stop Sale (Block)' : '⚠️ Warning Alert'}</span>
-                  </div>
-                  <p className="text-[10px] text-slate-400">Choose action when an eligible customer exceeds their set Max Credit Limit during POS sale checkout.</p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                    <label className={`flex items-start gap-2.5 p-2.5 rounded-lg border cursor-pointer transition-colors ${creditPolicy === 'stop' ? 'bg-rose-500/10 border-rose-500/50 text-white' : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'}`}>
-                      <input
-                        type="radio"
-                        name="bizProfileCreditPolicy"
-                        value="stop"
-                        checked={creditPolicy === 'stop'}
-                        onChange={() => {
-                          setCreditPolicy('stop');
-                          setShopProfile(prev => ({ ...prev, creditPolicy: 'stop' }));
-                          saveTenantSettingsPartial({ creditPolicy: 'stop' });
-                        }}
-                        className="mt-0.5 text-rose-500"
-                      />
-                      <div>
-                        <span className="font-bold text-xs block text-rose-400">🛑 Stop Sale (Strict Block)</span>
-                        <span className="text-[10px] text-slate-400 block mt-0.5">Disallow completing sale until debt is settled below limit.</span>
-                      </div>
-                    </label>
-                    <label className={`flex items-start gap-2.5 p-2.5 rounded-lg border cursor-pointer transition-colors ${creditPolicy === 'warn' ? 'bg-amber-500/10 border-amber-500/50 text-white' : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'}`}>
-                      <input
-                        type="radio"
-                        name="bizProfileCreditPolicy"
-                        value="warn"
-                        checked={creditPolicy === 'warn'}
-                        onChange={() => {
-                          setCreditPolicy('warn');
-                          setShopProfile(prev => ({ ...prev, creditPolicy: 'warn' }));
-                          saveTenantSettingsPartial({ creditPolicy: 'warn' });
-                        }}
-                        className="mt-0.5 text-amber-500"
-                      />
-                      <div>
-                        <span className="font-bold text-xs block text-amber-400">⚠️ Give Warning Alert & Continue</span>
-                        <span className="text-[10px] text-slate-400 block mt-0.5">Show warning dialog with debt details and prompt cashier to proceed.</span>
-                      </div>
-                    </label>
-                  </div>
-                </div>
               </div>
               <button onClick={handleSaveShopProfile} className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded text-xs transition-colors">Save Business Profile</button>
             </div>
