@@ -18,3 +18,7 @@
 .h-35 {
   height: calc(var(--spacing) * 35);
 }
+
+.h-45 {
+  height: calc(var(--spacing) * 45);
+}

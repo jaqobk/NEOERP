@@ -6191,16 +6191,16 @@ export default function App() {
 
                 return (
                   <div className="space-y-3">
-                    <div className="overflow-y-auto h-[750px] min-h-[700px] max-h-[calc(100vh-170px)] pr-1">
+                    <div className="overflow-y-auto h-[600px] min-h-[580px] max-h-[calc(100vh-170px)] pr-1">
                       {pagedItems.length === 0 ? (
                         <div className="py-12 text-center text-slate-500 text-xs">No items found matching filter or search.</div>
                       ) : (
-                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3.5">
                           {pagedItems.map(item => (
-                            <div key={item.id} onClick={() => addToCart(item)} className="bg-slate-900 border border-slate-700 rounded-lg p-2.5 cursor-pointer hover:border-emerald-500 flex flex-col justify-between relative transition-colors h-[240px]">
+                            <div key={item.id} onClick={() => addToCart(item)} className="bg-slate-900 border border-slate-700 rounded-lg p-2.5 cursor-pointer hover:border-emerald-500 flex flex-col justify-between relative transition-colors h-[280px]">
                               <div className="absolute top-2 right-2 bg-slate-950/80 px-2 py-0.5 rounded text-[10px] text-slate-300 font-mono">Stock: {isTrackedInventory(item) ? item.quantity : '∞'}</div>
                               <div>
-                                <img src={item.photoUrl} alt="" className="w-full h-35 object-cover rounded-md mb-1.5" />
+                                <img src={item.photoUrl} alt="" className="w-full h-45 object-cover rounded-md mb-1.5" />
                                 <p className="font-bold text-xs text-white line-clamp-1">{item.name}</p>
                                 {(() => {
                                   const summary = getItemVarianceSummary(item);
