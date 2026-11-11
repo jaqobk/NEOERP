@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      (function () {
+        function patchGetterOnlyFetch(target) {
+          if (!target) return;
+          try {
+            var desc = Object.getOwnPropertyDescriptor(target, 'fetch');
+            if (!desc || !desc.configurable) return;
+            if (desc.get && !desc.set) {
+              var origGet = desc.get;
+              Object.defineProperty(target, 'fetch', {
+                configurable: true,
+                enumerable: desc.enumerable !== false,
+                get: function () { return origGet.call(this); },
+                set: function () {}
+              });
+            } else if ('value' in desc && desc.writable === false) {
+              var origVal = desc.value;
+              Object.defineProperty(target, 'fetch', {
+                configurable: true,
+                enumerable: desc.enumerable !== false,
+                get: function () { return origVal; },
+                set: function () {}
+              });
+            }
+          } catch (_) {}
+        }
+        function guardFetch() {
+          patchGetterOnlyFetch(window);
+          if (typeof Window !== 'undefined' && Window.prototype) {
+            patchGetterOnlyFetch(Window.prototype);
+          }
+        }
+        guardFetch();
+        window.addEventListener('error', function (e) {
+          var msg = String((e && e.message) || '');
+          var src = String((e && e.filename) || '');
+          if (
+            src.indexOf('chrome-extension://') === 0 ||
+            msg.indexOf('Cannot set property fetch') !== -1
+          ) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+          }
+        }, true);
+        document.addEventListener('readystatechange', guardFetch);
+        window.addEventListener('DOMContentLoaded', guardFetch);
+      })();
+    </script>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f172a'/%3E%3Ctext x='16' y='22' font-family='sans-serif' font-size='16' font-weight='bold' fill='%2310b981' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A40 ERP</title>
+    <meta name="description" content="Multi-tenant retail POS, inventory, accounting ledger, purchase order, and HR management ERP system." />
+    <meta property="og:title" content="A40 ERP" />
+    <meta property="og:description" content="Multi-tenant retail POS, inventory, accounting ledger, purchase order, and HR management ERP system." />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      try {
+        var d = Object.getOwnPropertyDescriptor(window, 'fetch');
+        if (d && d.configurable && d.get && !d.set) {
+          var g = d.get;
+          Object.defineProperty(window, 'fetch', {
+            configurable: true,
+            enumerable: d.enumerable !== false,
+            get: function () { return g.call(this); },
+            set: function () {}
+          });
+        }
+      } catch (_) {}
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

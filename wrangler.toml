@@ -1,0 +1,8 @@
+name = "neo-erp"
+compatibility_date = "2026-10-19"
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "neodb"
+database_id = "bf24b08c-4037-4183-b809-92624487ac76"

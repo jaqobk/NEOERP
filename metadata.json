@@ -1,0 +1,5 @@
+{
+  "name": "A40 ERP",
+  "description": "Multi-tenant retail POS, inventory, accounting ledger, purchase order, and HR management ERP system.",
+  "requestFramePermissions": []
+}
