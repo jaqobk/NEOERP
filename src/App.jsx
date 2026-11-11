@@ -6882,27 +6882,40 @@ export default function App() {
                     if (!i.branchId) return true;
                     return String(i.branchId) === String(srcId);
                   });
+                  const selectedSrcItem = srcItems.find(i => i.id === line.itemId);
+                  const transferVarSummary = selectedSrcItem ? getItemVarianceSummary(selectedSrcItem) : '';
                   return (
-                    <div key={idx} className="grid grid-cols-1 sm:grid-cols-12 gap-2 text-xs items-center">
-                      <SearchableSelect value={line.itemId || ''} onChange={e => {
-                        const lines = [...(transferForm.lines || [{ itemId: '', qty: '' }])];
-                        lines[idx] = { ...lines[idx], itemId: e.target.value };
-                        setTransferForm({ ...transferForm, lines });
-                      }} className="sm:col-span-7 bg-slate-900 border border-slate-700 rounded p-2 text-white">
-                        <option value="">Select item</option>
-                        {srcItems.map(i => (
-                          <option key={i.id} value={i.id}>{formatItemDisplayName(i)} (qty {i.quantity})</option>
-                        ))}
-                      </SearchableSelect>
-                      <input type="number" min="1" placeholder="Qty" value={line.qty || ''} onChange={e => {
-                        const lines = [...(transferForm.lines || [{ itemId: '', qty: '' }])];
-                        lines[idx] = { ...lines[idx], qty: e.target.value };
-                        setTransferForm({ ...transferForm, lines });
-                      }} className="sm:col-span-3 bg-slate-900 border border-slate-700 rounded p-2 text-white" />
-                      <button type="button" className="sm:col-span-2 px-2 py-2 bg-red-500/20 text-red-400 text-[10px] font-bold rounded" onClick={() => {
-                        const lines = (transferForm.lines || []).filter((_, i) => i !== idx);
-                        setTransferForm({ ...transferForm, lines: lines.length ? lines : [{ itemId: '', qty: '' }] });
-                      }}>Remove</button>
+                    <div key={idx} className="p-2 rounded bg-slate-900 border border-slate-800 space-y-1.5 text-xs">
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                        <div className="sm:col-span-7">
+                          <SearchableSelect value={line.itemId || ''} onChange={e => {
+                            const lines = [...(transferForm.lines || [{ itemId: '', qty: '' }])];
+                            lines[idx] = { ...lines[idx], itemId: e.target.value };
+                            setTransferForm({ ...transferForm, lines });
+                          }} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
+                            <option value="">Select item</option>
+                            {srcItems.map(i => (
+                              <option key={i.id} value={i.id}>{formatItemDisplayName(i)} (qty {i.quantity})</option>
+                            ))}
+                          </SearchableSelect>
+                        </div>
+                        <input type="number" min="1" placeholder="Qty" value={line.qty || ''} onChange={e => {
+                          const lines = [...(transferForm.lines || [{ itemId: '', qty: '' }])];
+                          lines[idx] = { ...lines[idx], qty: e.target.value };
+                          setTransferForm({ ...transferForm, lines });
+                        }} className="sm:col-span-3 bg-slate-950 border border-slate-700 rounded p-2 text-white" />
+                        <button type="button" className="sm:col-span-2 px-2 py-2 bg-red-500/20 text-red-400 text-[10px] font-bold rounded" onClick={() => {
+                          const lines = (transferForm.lines || []).filter((_, i) => i !== idx);
+                          setTransferForm({ ...transferForm, lines: lines.length ? lines : [{ itemId: '', qty: '' }] });
+                        }}>Remove</button>
+                      </div>
+                      {line.itemId && transferVarSummary && (
+                        <div className="flex items-center gap-1.5 text-[10px]">
+                          <span className="px-1.5 py-0.5 rounded bg-sky-950 border border-sky-500/40 text-sky-300 font-medium">
+                            Variance: {transferVarSummary}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -7440,8 +7453,24 @@ export default function App() {
                                       supplierName: po.supplierName || '',
                                       notes: `Duplicated from ${po.id}`
                                     });
-                                    let lines = [{ itemId: po.itemId || '', itemName: po.itemName || '', quantity: po.quantity || 1, cost: po.cost || 0, amount: (po.quantity || 1) * (po.cost || 0) }];
-                                    if (po.groupId) {
+                                    let lines = [];
+                                    if (po.items) {
+                                      try {
+                                        const parsed = typeof po.items === 'string' ? JSON.parse(po.items) : po.items;
+                                        if (Array.isArray(parsed) && parsed.length > 0) {
+                                          lines = parsed.map(ln => ({
+                                            itemId: ln.itemId || '',
+                                            itemName: ln.itemName || '',
+                                            quantity: ln.quantity || 1,
+                                            cost: ln.cost || 0,
+                                            amount: (ln.quantity || 1) * (ln.cost || 0),
+                                            varianceSummary: ln.varianceSummary || '',
+                                            varianceValues: ln.varianceValues || {}
+                                          }));
+                                        }
+                                      } catch (_) {}
+                                    }
+                                    if (lines.length === 0 && po.groupId) {
                                       const groupMembers = (purchaseOrders || []).filter(p => p.groupId === po.groupId);
                                       if (groupMembers.length > 0) {
                                         lines = groupMembers.map(gm => ({
@@ -7449,14 +7478,26 @@ export default function App() {
                                           itemName: gm.itemName || '',
                                           quantity: gm.quantity || 1,
                                           cost: gm.cost || 0,
-                                          amount: (gm.quantity || 1) * (gm.cost || 0)
+                                          amount: (gm.quantity || 1) * (gm.cost || 0),
+                                          varianceSummary: gm.varianceSummary || '',
+                                          varianceValues: gm.varianceValues || {}
                                         }));
                                       }
                                     }
+                                    if (lines.length === 0) {
+                                      lines = [{
+                                        itemId: po.itemId || '',
+                                        itemName: po.itemName || '',
+                                        quantity: po.quantity || 1,
+                                        cost: po.cost || 0,
+                                        amount: (po.quantity || 1) * (po.cost || 0),
+                                        varianceSummary: po.varianceSummary || '',
+                                        varianceValues: po.varianceValues || {}
+                                      }];
+                                    }
                                     setPoLines(lines);
-                                    setPurchaseSubTab('all');
+                                    setNewPOModalOpen(true);
                                     window.scrollTo({ top: 0, behavior: 'smooth' });
-                                    alert(`Duplicated lines from PO ${po.id} into Create Purchase Order form.`);
                                   }}
                                   className="px-2 py-1 bg-slate-700/80 hover:bg-slate-700 text-slate-200 font-bold rounded text-[10px] inline-flex items-center gap-1 cursor-pointer"
                                   title="Duplicate this purchase order details"
@@ -7624,17 +7665,20 @@ export default function App() {
             {/* New Purchase Order Modal with Dynamic Cost & Amount Calculation */}
             {newPOModalOpen && (
               <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
-                <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
+                <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-2xl space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
                   <div className="flex justify-between items-center border-b border-slate-800 pb-2">
-                    <h4 className="font-bold text-white text-sm">Create Purchase Order</h4>
-                    <button onClick={() => setNewPOModalOpen(false)} className="text-slate-400">✕</button>
+                    <div>
+                      <h4 className="font-bold text-white text-sm">Create Purchase Order</h4>
+                      <p className="text-[11px] text-slate-400">Select supplier, items, and review product variances & costs</p>
+                    </div>
+                    <button onClick={() => setNewPOModalOpen(false)} className="text-slate-400 hover:text-white transition-colors">✕</button>
                   </div>
                   <form onSubmit={async e => {
                     e.preventDefault();
                     if (!newPOForm.supplierId) return alert('Select a supplier');
                     const lines = (poLines || []).filter(l => l.itemId && l.itemName && (parseInt(l.quantity) || 0) > 0);
                     if (!lines.length) return alert('Add at least one item');
-                    // Single PO for multi-item: one workflow record, items stored as array
+                    // Single PO for multi-item: one workflow record, items stored as array with variance details
                     const linePayloads = lines.map(line => {
                       const baseAmount = parseFloat(line.amount) || ((parseFloat(line.cost) || 0) * (parseInt(line.quantity) || 1));
                       let lineTax = 0;
@@ -7648,9 +7692,14 @@ export default function App() {
                           lineFinal = baseAmount + lineTax;
                         }
                       }
+                      const invItem = (branchInventory || []).find(i => i.id === line.itemId);
+                      const varianceSummary = invItem ? getItemVarianceSummary(invItem) : (line.varianceSummary || '');
+                      const varianceValues = invItem ? parseItemVarianceValues(invItem) : (line.varianceValues || {});
                       return {
                         itemId: line.itemId,
                         itemName: line.itemName,
+                        varianceSummary,
+                        varianceValues,
                         quantity: parseInt(line.quantity) || 1,
                         cost: parseFloat(line.cost) || 0,
                         amount: lineFinal,
@@ -7671,6 +7720,8 @@ export default function App() {
                       supplierName: newPOForm.supplierName,
                       itemId: first.itemId,
                       itemName: linePayloads.length > 1 ? `${linePayloads.length} items` : first.itemName,
+                      varianceSummary: first.varianceSummary || '',
+                      varianceValues: first.varianceValues || {},
                       quantity: totalQty,
                       cost: first.cost,
                       amount: totalAmount,
@@ -7688,7 +7739,7 @@ export default function App() {
                     try { await apiFetch('/api/purchase_orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(po) }); } catch (e) { console.warn(e); }
                     const nextPOs = [po, ...purchaseOrders];
                     setPurchaseOrders(nextPOs);
-                    setPoLines([{ itemId: '', itemName: '', quantity: 1, cost: 0, amount: 0 }]);
+                    setPoLines([{ itemId: '', itemName: '', quantity: 1, cost: 0, amount: 0, varianceSummary: '', varianceValues: {} }]);
                     setNewPOModalOpen(false);
                   }} className="space-y-3 text-xs">
                     <div>
@@ -7702,70 +7753,130 @@ export default function App() {
                         {(branchSuppliers || []).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                       </SearchableSelect>
                     </div>
-                    <div className="space-y-2 border border-slate-700 rounded-lg p-2">
+                    <div className="space-y-2 border border-slate-700 rounded-lg p-2.5 bg-slate-950/40">
                       <div className="flex items-center justify-between">
-                        <label className="text-slate-400 font-semibold">Items *</label>
-                        <button type="button" className="px-2 py-1 bg-emerald-500/20 text-emerald-400 text-[10px] font-bold rounded" onClick={() => setPoLines([...(poLines || []), { itemId: '', itemName: '', quantity: 1, cost: 0, amount: 0 }])}>+ Add item</button>
-                      </div>
-                      {(poLines || [{ itemId: '', itemName: '', quantity: 1, cost: 0, amount: 0 }]).map((line, idx) => (
-                        <div key={idx} className="grid grid-cols-12 gap-1 items-end">
-                          <div className="col-span-5">
-                            <label className="text-[9px] text-slate-500">Item</label>
-                            <SearchableSelect value={line.itemId || ''} onChange={e => {
-                              const itemId = e.target.value;
-                              const invItem = (branchInventory || []).find(i => i.id === itemId);
-                              const lines = [...(poLines || [])];
-                              if (invItem) {
-                                const cost = invItem.buyingPrice || 0;
-                                const qty = lines[idx]?.quantity || 1;
-                                lines[idx] = { itemId, itemName: formatItemDisplayName(invItem), quantity: qty, cost, amount: cost * qty };
-                              } else {
-                                lines[idx] = { ...lines[idx], itemId: '', itemName: '' };
-                              }
-                              setPoLines(lines);
-                              const first = lines[0] || {};
-                              setNewPOForm({ ...newPOForm, itemId: first.itemId || '', itemName: first.itemName || '', quantity: first.quantity || 1, cost: first.cost || 0, amount: lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0) });
-                            }} className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-white text-[11px]">
-                              <option value="">-- Item --</option>
-                              {(branchInventory || []).map(i => <option key={i.id} value={i.id}>{formatItemDisplayName(i)}</option>)}
-                            </SearchableSelect>
-                          </div>
-                          <div className="col-span-2">
-                            <label className="text-[9px] text-slate-500">Qty</label>
-                            <input type="number" min="1" value={line.quantity || 1} onChange={e => {
-                              const quantity = parseInt(e.target.value) || 1;
-                              const lines = [...(poLines || [])];
-                              const cost = parseFloat(lines[idx].cost) || 0;
-                              lines[idx] = { ...lines[idx], quantity, amount: quantity * cost };
-                              setPoLines(lines);
-                              setNewPOForm({ ...newPOForm, amount: lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0), quantity: lines[0]?.quantity || 1, cost: lines[0]?.cost || 0 });
-                            }} className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-white text-[11px]" />
-                          </div>
-                          <div className="col-span-2">
-                            <label className="text-[9px] text-slate-500">Cost</label>
-                            <input type="number" value={line.cost || 0} onChange={e => {
-                              const cost = parseFloat(e.target.value) || 0;
-                              const lines = [...(poLines || [])];
-                              const quantity = parseInt(lines[idx].quantity) || 1;
-                              lines[idx] = { ...lines[idx], cost, amount: quantity * cost };
-                              setPoLines(lines);
-                              setNewPOForm({ ...newPOForm, amount: lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0), cost: lines[0]?.cost || 0 });
-                            }} className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-white text-[11px]" />
-                          </div>
-                          <div className="col-span-2">
-                            <label className="text-[9px] text-slate-500">Amount</label>
-                            <input type="number" value={line.amount || 0} readOnly className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-slate-300 text-[11px]" />
-                          </div>
-                          <div className="col-span-1">
-                            <button type="button" className="w-full py-1.5 text-red-400 text-[10px] font-bold" onClick={() => {
-                              const lines = (poLines || []).filter((_, i) => i !== idx);
-                              const next = lines.length ? lines : [{ itemId: '', itemName: '', quantity: 1, cost: 0, amount: 0 }];
-                              setPoLines(next);
-                              setNewPOForm({ ...newPOForm, amount: next.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0) });
-                            }}>✕</button>
-                          </div>
+                        <div>
+                          <label className="text-slate-300 font-semibold text-xs">Items & Variances *</label>
+                          <p className="text-[10px] text-slate-500">Select product variant to automatically show active variances and current stock</p>
                         </div>
-                      ))}
+                        <button type="button" className="px-2.5 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 text-[11px] font-bold rounded flex items-center gap-1 transition-colors" onClick={() => setPoLines([...(poLines || []), { itemId: '', itemName: '', quantity: 1, cost: 0, amount: 0, varianceSummary: '', varianceValues: {} }])}>+ Add item</button>
+                      </div>
+                      {(poLines || [{ itemId: '', itemName: '', quantity: 1, cost: 0, amount: 0 }]).map((line, idx) => {
+                        const invItem = (branchInventory || []).find(i => i.id === line.itemId);
+                        const vv = invItem ? parseItemVarianceValues(invItem) : (line.varianceValues || {});
+                        const entries = Object.entries(vv);
+                        const varSummary = invItem ? getItemVarianceSummary(invItem) : (line.varianceSummary || '');
+
+                        return (
+                          <div key={idx} className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 space-y-2 shadow-sm">
+                            <div className="grid grid-cols-12 gap-1.5 items-start">
+                              <div className="col-span-5">
+                                <label className="text-[10px] text-slate-400 font-medium block mb-0.5">Item *</label>
+                                <SearchableSelect value={line.itemId || ''} onChange={e => {
+                                  const itemId = e.target.value;
+                                  const selectedInv = (branchInventory || []).find(i => i.id === itemId);
+                                  const lines = [...(poLines || [])];
+                                  if (selectedInv) {
+                                    const cost = selectedInv.buyingPrice || 0;
+                                    const qty = lines[idx]?.quantity || 1;
+                                    const summary = getItemVarianceSummary(selectedInv);
+                                    const parsedVV = parseItemVarianceValues(selectedInv);
+                                    lines[idx] = {
+                                      itemId,
+                                      itemName: formatItemDisplayName(selectedInv),
+                                      baseName: selectedInv.name || '',
+                                      varianceSummary: summary,
+                                      varianceValues: parsedVV,
+                                      quantity: qty,
+                                      cost,
+                                      amount: cost * qty
+                                    };
+                                  } else {
+                                    lines[idx] = { ...lines[idx], itemId: '', itemName: '', varianceSummary: '', varianceValues: {} };
+                                  }
+                                  setPoLines(lines);
+                                  const first = lines[0] || {};
+                                  setNewPOForm({ ...newPOForm, itemId: first.itemId || '', itemName: first.itemName || '', quantity: first.quantity || 1, cost: first.cost || 0, amount: lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0) });
+                                }} className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-white text-[11px]">
+                                  <option value="">-- Choose Item --</option>
+                                  {(branchInventory || []).map(i => (
+                                    <option key={i.id} value={i.id}>
+                                      {formatItemDisplayName(i)}{isTrackedInventory(i) ? ` [Stock: ${i.quantity}]` : ''}
+                                    </option>
+                                  ))}
+                                </SearchableSelect>
+                              </div>
+                              <div className="col-span-2">
+                                <label className="text-[10px] text-slate-400 font-medium block mb-0.5">Qty</label>
+                                <input type="number" min="1" value={line.quantity || 1} onChange={e => {
+                                  const quantity = parseInt(e.target.value) || 1;
+                                  const lines = [...(poLines || [])];
+                                  const cost = parseFloat(lines[idx].cost) || 0;
+                                  lines[idx] = { ...lines[idx], quantity, amount: quantity * cost };
+                                  setPoLines(lines);
+                                  setNewPOForm({ ...newPOForm, amount: lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0), quantity: lines[0]?.quantity || 1, cost: lines[0]?.cost || 0 });
+                                }} className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-white text-[11px]" />
+                              </div>
+                              <div className="col-span-2">
+                                <label className="text-[10px] text-slate-400 font-medium block mb-0.5">Cost</label>
+                                <input type="number" step="0.01" value={line.cost || 0} onChange={e => {
+                                  const cost = parseFloat(e.target.value) || 0;
+                                  const lines = [...(poLines || [])];
+                                  const quantity = parseInt(lines[idx].quantity) || 1;
+                                  lines[idx] = { ...lines[idx], cost, amount: quantity * cost };
+                                  setPoLines(lines);
+                                  setNewPOForm({ ...newPOForm, amount: lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0), cost: lines[0]?.cost || 0 });
+                                }} className="w-full bg-slate-950 border border-slate-700 rounded p-1.5 text-white text-[11px]" />
+                              </div>
+                              <div className="col-span-2">
+                                <label className="text-[10px] text-slate-400 font-medium block mb-0.5">Amount</label>
+                                <input type="number" value={line.amount || 0} readOnly className="w-full bg-slate-950/70 border border-slate-800 rounded p-1.5 text-emerald-400 font-semibold text-[11px]" />
+                              </div>
+                              <div className="col-span-1 flex items-center justify-center pt-5">
+                                <button type="button" title="Remove line" className="w-7 h-7 flex items-center justify-center text-red-400 hover:text-red-300 hover:bg-red-500/20 rounded font-bold transition-colors" onClick={() => {
+                                  const lines = (poLines || []).filter((_, i) => i !== idx);
+                                  const next = lines.length ? lines : [{ itemId: '', itemName: '', quantity: 1, cost: 0, amount: 0, varianceSummary: '', varianceValues: {} }];
+                                  setPoLines(next);
+                                  setNewPOForm({ ...newPOForm, amount: next.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0) });
+                                }}>✕</button>
+                              </div>
+                            </div>
+
+                            {/* Active Product Variance Display */}
+                            {line.itemId && (
+                              <div className="pt-1.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-1.5 text-[11px]">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="text-[10px] font-bold text-sky-400 uppercase tracking-wider flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse"></span>
+                                    Active Variance:
+                                  </span>
+                                  {entries.length > 0 ? (
+                                    entries.map(([k, val]) => (
+                                      <span key={k} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-950/90 border border-sky-500/50 text-[11px] font-semibold text-sky-300 shadow-sm">
+                                        <span className="text-slate-400 font-normal">{k}:</span>
+                                        <strong className="text-sky-100">{val}</strong>
+                                      </span>
+                                    ))
+                                  ) : varSummary ? (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-sky-950/90 border border-sky-500/50 text-[11px] font-semibold text-sky-300">
+                                      {varSummary}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-500 italic text-[10px]">Standard item (No active variance attributes)</span>
+                                  )}
+                                </div>
+                                {invItem && (
+                                  <div className="flex items-center gap-2 text-[10px] font-mono text-slate-400">
+                                    <span>Buying Price: <strong className="text-slate-200">{shopProfile.currency} {invItem.buyingPrice || 0}</strong></span>
+                                    <span>·</span>
+                                    <span>Stock: <strong className={isTrackedInventory(invItem) && invItem.quantity <= (invItem.lowStockAlert || 5) ? 'text-amber-400 font-bold' : 'text-emerald-400 font-bold'}>{isTrackedInventory(invItem) ? invItem.quantity : '∞'}</strong></span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                       <p className="text-[10px] text-emerald-400 font-semibold">Lines total: {shopProfile.currency} {(poLines || []).reduce((s, l) => s + (parseFloat(l.amount) || 0), 0).toLocaleString()}</p>
                     </div>
                     <div className="space-y-1.5 bg-slate-950 border border-slate-700 rounded p-2">
@@ -7823,24 +7934,52 @@ export default function App() {
                       <input type="text" value={selectedPO.supplierName || ''} disabled={!(isAdminUser || canUpdate('purchase'))} onChange={e => setSelectedPO({...selectedPO, supplierName: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white disabled:opacity-70" />
                     </div>
                     <div>
-                      <label className="text-slate-400 block mb-1">Item</label>
+                      <label className="text-slate-400 block mb-1">Item(s) & Product Variances</label>
                       {(() => {
                         let lines = selectedPO.items;
                         if (typeof lines === 'string') { try { lines = JSON.parse(lines); } catch { lines = null; } }
-                        if (Array.isArray(lines) && lines.length > 1) {
+                        if (Array.isArray(lines) && lines.length > 0) {
                           return (
-                            <div className="bg-slate-950 border border-slate-700 rounded p-2 space-y-1 max-h-40 overflow-y-auto">
-                              {lines.map((ln, i) => (
-                                <div key={i} className="flex justify-between text-xs text-slate-300">
-                                  <span>{ln.itemName || ln.itemId}</span>
-                                  <span className="text-slate-400">×{ln.quantity} @ {ln.cost}</span>
-                                </div>
-                              ))}
+                            <div className="bg-slate-950 border border-slate-700 rounded-lg p-2.5 space-y-2 max-h-48 overflow-y-auto">
+                              {lines.map((ln, i) => {
+                                const inv = (inventory || []).find(it => it.id === ln.itemId);
+                                const varSummary = ln.varianceSummary || (inv ? getItemVarianceSummary(inv) : '');
+                                return (
+                                  <div key={i} className="text-xs text-slate-300 border-b border-slate-800 pb-2 last:border-0 last:pb-0">
+                                    <div className="flex justify-between items-center">
+                                      <span className="font-semibold text-white">{ln.itemName || ln.itemId}</span>
+                                      <span className="text-slate-400 font-mono">×{ln.quantity} @ {shopProfile.currency} {ln.cost}</span>
+                                    </div>
+                                    {varSummary ? (
+                                      <div className="mt-1 flex items-center gap-1.5">
+                                        <span className="text-[10px] px-2 py-0.5 rounded bg-sky-950/90 border border-sky-500/40 text-sky-300 font-medium inline-flex items-center gap-1">
+                                          <span className="text-slate-400">Variance:</span>
+                                          <strong className="text-sky-200">{varSummary}</strong>
+                                        </span>
+                                      </div>
+                                    ) : (
+                                      <div className="mt-0.5 text-[10px] text-slate-500 italic">No variance attributes</div>
+                                    )}
+                                  </div>
+                                );
+                              })}
                             </div>
                           );
                         }
+                        const singleInv = (inventory || []).find(it => it.id === selectedPO.itemId);
+                        const singleVar = selectedPO.varianceSummary || (singleInv ? getItemVarianceSummary(singleInv) : '');
                         return (
-                          <input type="text" value={selectedPO.itemName || ''} disabled={!(isAdminUser || canUpdate('purchase'))} onChange={e => setSelectedPO({...selectedPO, itemName: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white disabled:opacity-70" />
+                          <div className="space-y-1.5">
+                            <input type="text" value={selectedPO.itemName || ''} disabled={!(isAdminUser || canUpdate('purchase'))} onChange={e => setSelectedPO({...selectedPO, itemName: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white disabled:opacity-70" />
+                            {singleVar && (
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[10px] px-2 py-0.5 rounded bg-sky-950/90 border border-sky-500/40 text-sky-300 font-medium inline-flex items-center gap-1">
+                                  <span className="text-slate-400">Variance:</span>
+                                  <strong className="text-sky-200">{singleVar}</strong>
+                                </span>
+                              </div>
+                            )}
+                          </div>
                         );
                       })()}
                     </div>
