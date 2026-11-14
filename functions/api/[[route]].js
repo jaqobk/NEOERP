@@ -103,8 +103,8 @@ export async function onRequest(context) {
     const isHashedPin = (stored) => String(stored || '').startsWith('pbkdf2$');
 
     const ensureAuthTables = async () => {
-      // Run heavy migrations only once per Worker isolate (speeds up login a lot)
-      if (globalThis.__neoSchemaReady) return;
+      // Run heavy migrations & index creation only once per Worker isolate / DB binding
+      if (globalThis.__neoSchemaReady && globalThis.__neoSchemaDb === env.DB) return;
       try {
         await env.DB.prepare(`CREATE TABLE IF NOT EXISTS api_sessions (
           token TEXT PRIMARY KEY,
@@ -221,18 +221,63 @@ export async function onRequest(context) {
       for (const t of tables) {
         try { await env.DB.prepare(`ALTER TABLE ${t} ADD COLUMN tenantId TEXT`).run(); } catch (_) {}
       }
+      // Operational tables + forward-compatible columns (run once per isolate)
+      try {
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS expenses (
+          id TEXT PRIMARY KEY, date TEXT, category TEXT, description TEXT, amount REAL,
+          paymentMethod TEXT, mpesaCode TEXT, payer TEXT, paidTo TEXT,
+          paidAmount REAL, balanceDue REAL, paymentStatus TEXT, taxAmount REAL, tenantId TEXT, branchId TEXT, paymentHistory TEXT
+        )`).run();
+      } catch (_) {}
+      try {
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS employees (
+          id TEXT PRIMARY KEY, name TEXT, position TEXT, department TEXT, phone TEXT, email TEXT,
+          hireDate TEXT, salary REAL, status TEXT, nationalId TEXT, bankAccount TEXT, bankName TEXT, leaveBalance REAL, managerId TEXT, userId TEXT, tenantId TEXT, branchId TEXT
+        )`).run();
+      } catch (_) {}
+      try {
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS leave_requests (
+          id TEXT PRIMARY KEY, employeeId TEXT, employeeName TEXT, leaveType TEXT, startDate TEXT, endDate TEXT,
+          days REAL, reason TEXT, status TEXT, approvedBy TEXT, createdAt TEXT, managerId TEXT, approverId TEXT, managerName TEXT, decidedAt TEXT, tenantId TEXT, branchId TEXT, balanceDeducted INTEGER DEFAULT 0
+        )`).run();
+      } catch (_) {}
+      try {
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS payroll (
+          id TEXT PRIMARY KEY, employeeId TEXT, employeeName TEXT, period TEXT, basicSalary REAL, allowances REAL,
+          deductions REAL, taxAmount REAL, netPay REAL, status TEXT, paidDate TEXT, notes TEXT,
+          allowanceBreakdown TEXT, deductionBreakdown TEXT, allowanceOtherSpec TEXT, deductionOtherSpec TEXT, tenantId TEXT, branchId TEXT
+        )`).run();
+      } catch (_) {}
       // Forward-compatible purchase workflow columns used by receipt/payment/return tracking.
       for (const col of ['taxInclusive INTEGER DEFAULT 0', 'paymentHistory TEXT', 'received INTEGER DEFAULT 0', 'returnedQty INTEGER DEFAULT 0', 'returnHistory TEXT', 'taxAmount REAL DEFAULT 0', 'taxRate REAL DEFAULT 0', 'createdBy TEXT', 'cogsBooked REAL DEFAULT 0', 'items TEXT', 'groupId TEXT']) {
         try { await env.DB.prepare(`ALTER TABLE purchase_orders ADD COLUMN ${col}`).run(); } catch (_) {}
       }
-      for (const col of ['returnHistory TEXT', 'taxInclusive INTEGER DEFAULT 0', 'originalSaleType TEXT', 'paymentHistory TEXT']) {
+      for (const col of ['returnHistory TEXT', 'taxInclusive INTEGER DEFAULT 0', 'originalSaleType TEXT', 'paymentHistory TEXT', 'subtotal REAL', 'taxAmount REAL', 'taxRate REAL', 'taxName TEXT', 'idempotencyKey TEXT']) {
         try { await env.DB.prepare(`ALTER TABLE sales ADD COLUMN ${col}`).run(); } catch (_) {}
       }
-      try { await env.DB.prepare(`ALTER TABLE expenses ADD COLUMN paymentHistory TEXT`).run(); } catch (_) {}
+      for (const col of ['sku TEXT', 'size TEXT', 'colour TEXT', 'wholesalePrice REAL', 'varianceValues TEXT']) {
+        try { await env.DB.prepare(`ALTER TABLE inventory ADD COLUMN ${col}`).run(); } catch (_) {}
+      }
+      for (const col of ['loyaltyPoints REAL DEFAULT 0', 'creditLimit REAL DEFAULT 0', 'salesTermId TEXT', 'paymentTerm TEXT', 'tags TEXT', 'priceList TEXT', 'kraPin TEXT']) {
+        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN ${col}`).run(); } catch (_) {}
+      }
+      for (const col of ['paidAmount REAL', 'balanceDue REAL', 'paymentStatus TEXT', 'taxAmount REAL', 'paymentHistory TEXT']) {
+        try { await env.DB.prepare(`ALTER TABLE expenses ADD COLUMN ${col}`).run(); } catch (_) {}
+      }
+      for (const col of ['allowedBranches TEXT', 'photo TEXT']) {
+        try { await env.DB.prepare(`ALTER TABLE users ADD COLUMN ${col}`).run(); } catch (_) {}
+      }
+      for (const col of ['bankName TEXT', 'managerId TEXT', 'userId TEXT']) {
+        try { await env.DB.prepare(`ALTER TABLE employees ADD COLUMN ${col}`).run(); } catch (_) {}
+      }
+      for (const col of ['decidedAt TEXT', 'balanceDeducted INTEGER DEFAULT 0']) {
+        try { await env.DB.prepare(`ALTER TABLE leave_requests ADD COLUMN ${col}`).run(); } catch (_) {}
+      }
+      for (const col of ['allowanceBreakdown TEXT', 'deductionBreakdown TEXT', 'allowanceOtherSpec TEXT', 'deductionOtherSpec TEXT']) {
+        try { await env.DB.prepare(`ALTER TABLE payroll ADD COLUMN ${col}`).run(); } catch (_) {}
+      }
       try { await env.DB.prepare(`ALTER TABLE shop_profile ADD COLUMN logo TEXT`).run(); } catch (_) {}
       try { await env.DB.prepare(`ALTER TABLE shop_profile ADD COLUMN creditPolicy TEXT DEFAULT 'warn'`).run(); } catch (_) {}
-      try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN creditLimit REAL DEFAULT 0`).run(); } catch (_) {}
-      try { await env.DB.prepare(`ALTER TABLE tenant_settings ADD COLUMN creditPolicy TEXT DEFAULT 'warn'`).run(); } catch (_) {}
       // Default tenant + backfill
       try {
         const def = await env.DB.prepare(`SELECT id FROM tenants WHERE id = ?`).bind('tenant-default').first();
@@ -337,19 +382,37 @@ export async function onRequest(context) {
           await insRole.bind('role-sales', 'Salesperson', salesPriv, tid).run();
         }
       } catch (_) {}
-      // Best-effort composite uniqueness (SQLite may ignore if duplicates already exist)
-      try { await env.DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tenant_name ON users(tenantId, name)`).run(); } catch (_) {}
-      try { await env.DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_tenant_name ON roles(tenantId, name)`).run(); } catch (_) {}
-      try { await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_inventory_tenant ON inventory(tenantId)`).run(); } catch (_) {}
-      try { await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_sales_tenant ON sales(tenantId)`).run(); } catch (_) {}
-      try { await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_customers_tenant ON customers(tenantId)`).run(); } catch (_) {}
-      try { await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON api_sessions(userId)`).run(); } catch (_) {}
-      try { await env.DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_name_unique ON users(name)`).run(); } catch (_) {}
-      try { await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenantId)`).run(); } catch (_) {}
-      try { await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_inventory_tenant ON inventory(tenantId)`).run(); } catch (_) {}
-      try { await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_sales_tenant ON sales(tenantId)`).run(); } catch (_) {}
-      try { await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_po_tenant ON purchase_orders(tenantId)`).run(); } catch (_) {}
-      
+      // Performance indexes across core tables
+      const perfIndexes = [
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tenant_name ON users(tenantId, name)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_tenant_name ON roles(tenantId, name)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_name_unique ON users(name)`,
+        `CREATE INDEX IF NOT EXISTS idx_users_lower_name ON users(LOWER(name))`,
+        `CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_roles_tenant ON roles(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_inventory_tenant ON inventory(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_inventory_tenant_branch ON inventory(tenantId, branchId)`,
+        `CREATE INDEX IF NOT EXISTS idx_customers_tenant ON customers(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_sales_tenant ON sales(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_sales_idem ON sales(tenantId, idempotencyKey)`,
+        `CREATE INDEX IF NOT EXISTS idx_expenses_tenant ON expenses(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_suppliers_tenant ON suppliers(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_po_tenant ON purchase_orders(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_po_group ON purchase_orders(tenantId, groupId)`,
+        `CREATE INDEX IF NOT EXISTS idx_emp_tenant ON employees(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_leave_tenant ON leave_requests(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_payroll_tenant ON payroll(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_categories_tenant ON categories(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_expcat_tenant ON expense_categories(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_itemstat_tenant ON item_statuses(tenantId)`,
+        `CREATE INDEX IF NOT EXISTS idx_sessions_user ON api_sessions(userId)`,
+        `CREATE INDEX IF NOT EXISTS idx_login_attempts_user_at ON login_attempts(LOWER(username), at)`,
+        `CREATE INDEX IF NOT EXISTS idx_login_attempts_ip_at ON login_attempts(ip, ok, at)`
+      ];
+      for (const idxSql of perfIndexes) {
+        try { await env.DB.prepare(idxSql).run(); } catch (_) {}
+      }
+
       // Multi-tenant tax/hr settings (legacy tables forced id=1 which broke new shops)
       try {
         await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tax_settings_mt (
@@ -361,9 +424,15 @@ export async function onRequest(context) {
           purchaseTaxEnabled INTEGER DEFAULT 0,
           purchaseTaxRate REAL DEFAULT 0,
           purchaseTaxName TEXT,
+          expenseTaxEnabled INTEGER DEFAULT 0,
+          expenseTaxRate REAL DEFAULT 0,
+          expenseTaxName TEXT,
           taxInclusive INTEGER DEFAULT 0
         )`).run();
       } catch (_) {}
+      for (const col of ['expenseTaxEnabled INTEGER DEFAULT 0', 'expenseTaxRate REAL DEFAULT 0', 'expenseTaxName TEXT']) {
+        try { await env.DB.prepare(`ALTER TABLE tax_settings_mt ADD COLUMN ${col}`).run(); } catch (_) {}
+      }
       try {
         await env.DB.prepare(`CREATE TABLE IF NOT EXISTS hr_settings_mt (
           id TEXT PRIMARY KEY,
@@ -408,14 +477,19 @@ export async function onRequest(context) {
           itemVariances TEXT,
           poApprovalLimit REAL DEFAULT 0,
           returnRequests TEXT,
+          creditPolicy TEXT DEFAULT 'warn',
+          wizardCompleted INTEGER DEFAULT 1,
           updatedAt INTEGER
         )`).run();
       } catch (_) {}
-      for (const col of ['tasks TEXT', 'cashups TEXT', 'auditLog TEXT', 'itemVariances TEXT', 'poApprovalLimit REAL DEFAULT 0', 'returnRequests TEXT']) {
+      for (const col of ['tasks TEXT', 'cashups TEXT', 'auditLog TEXT', 'itemVariances TEXT', 'poApprovalLimit REAL DEFAULT 0', 'returnRequests TEXT', 'creditPolicy TEXT DEFAULT \'warn\'', 'wizardCompleted INTEGER DEFAULT 1']) {
         try { await env.DB.prepare(`ALTER TABLE tenant_settings ADD COLUMN ${col}`).run(); } catch (_) {}
       }
       try { await env.DB.prepare(`DROP TABLE IF EXISTS website_settings`).run(); } catch (_) {}
-globalThis.__neoSchemaReady = true;
+      globalThis.__neoTenantSettingsDb = env.DB;
+      globalThis.__neoTenantSettingsReady = true;
+      globalThis.__neoSchemaDb = env.DB;
+      globalThis.__neoSchemaReady = true;
     };
 
     const PLAN_LIMITS = {
@@ -448,9 +522,14 @@ globalThis.__neoSchemaReady = true;
     };
     const ensureDefaultBranch = async (tenantId, nameHint) => {
       const tid = tenantId || 'tenant-default';
+      globalThis.__neoBranchTenants = globalThis.__neoBranchTenants || new Set();
+      if (globalThis.__neoBranchTenants.has(tid)) return null;
       try {
         let row = await env.DB.prepare(`SELECT * FROM branches WHERE tenantId = ? ORDER BY isDefault DESC, createdAt ASC LIMIT 1`).bind(tid).first();
-        if (row) return row;
+        if (row) {
+          globalThis.__neoBranchTenants.add(tid);
+          return row;
+        }
         const id = 'br-' + tid.replace(/^tenant-/, '').slice(0, 12) + '-main';
         const nm = (nameHint || 'Main branch').slice(0, 80);
         await env.DB.prepare(
@@ -460,6 +539,7 @@ globalThis.__neoSchemaReady = true;
         for (const t of ['inventory', 'sales', 'expenses', 'purchase_orders', 'employees', 'leave_requests', 'payroll']) {
           try { await env.DB.prepare(`UPDATE ${t} SET branchId = ? WHERE (branchId IS NULL OR branchId = '') AND (tenantId = ? OR tenantId IS NULL OR tenantId = '')`).bind(id, tid).run(); } catch (_) {}
         }
+        globalThis.__neoBranchTenants.add(tid);
         return { id, tenantId: tid, name: nm, isDefault: 1, status: 'Active' };
       } catch (_) {
         return { id: 'br-default', tenantId: tid, name: nameHint || 'Main', isDefault: 1, status: 'Active' };
@@ -470,6 +550,7 @@ globalThis.__neoSchemaReady = true;
       try {
         let rows = (await env.DB.prepare(`SELECT * FROM branches WHERE tenantId = ? ORDER BY isDefault DESC, name ASC`).bind(tid).all()).results || [];
         if (!rows.length) {
+          globalThis.__neoBranchTenants?.delete?.(tid);
           const d = await ensureDefaultBranch(tid);
           rows = d ? [d] : [];
         }
@@ -477,10 +558,18 @@ globalThis.__neoSchemaReady = true;
       } catch (_) { return []; }
     };
     const resolveBranchId = async (tenantId, preferred) => {
-      const branches = await listBranches(tenantId);
-      if (preferred && branches.some(b => b.id === preferred)) return preferred;
-      const def = branches.find(b => b.isDefault) || branches[0];
-      return def ? def.id : null;
+      const tid = tenantId || 'tenant-default';
+      try {
+        if (preferred) {
+          const hit = await env.DB.prepare(`SELECT id FROM branches WHERE tenantId = ? AND id = ? LIMIT 1`).bind(tid, preferred).first();
+          if (hit && hit.id) return hit.id;
+        }
+        const def = await env.DB.prepare(`SELECT id FROM branches WHERE tenantId = ? ORDER BY isDefault DESC, createdAt ASC LIMIT 1`).bind(tid).first();
+        if (def && def.id) return def.id;
+        globalThis.__neoBranchTenants?.delete?.(tid);
+        const created = await ensureDefaultBranch(tid);
+        return created ? created.id : null;
+      } catch (_) { return null; }
     };
     const getEffectiveAllowedBranches = (authUser) => {
       if (!authUser || authUser.isAdmin || authUser.isSuperAdmin) return null;
@@ -522,10 +611,16 @@ globalThis.__neoSchemaReady = true;
       const cutoff = Date.now() - LOGIN_WINDOW_MS;
       const maxFails = (key.startsWith('signup:') || key.startsWith('change-pin:')) ? SENSITIVE_MAX_FAILS : LOGIN_MAX_FAILS;
       try {
+        const [userRes, ipRow] = await Promise.all([
+          key
+            ? env.DB.prepare(`SELECT ok, at FROM login_attempts WHERE LOWER(username) = ? AND at >= ? ORDER BY at DESC LIMIT 30`).bind(key, cutoff).all()
+            : Promise.resolve({ results: [] }),
+          (ip && ip !== 'unknown')
+            ? env.DB.prepare(`SELECT COUNT(*) as c, MIN(at) as oldest FROM login_attempts WHERE ip = ? AND ok = 0 AND at >= ?`).bind(ip, cutoff).first()
+            : Promise.resolve(null)
+        ]);
         if (key) {
-          const rows = (await env.DB.prepare(
-            `SELECT ok, at FROM login_attempts WHERE LOWER(username) = ? AND at >= ? ORDER BY at DESC LIMIT 30`
-          ).bind(key, cutoff).all()).results || [];
+          const rows = userRes?.results || [];
           let streakFails = 0;
           let earliestFailAt = null;
           for (const r of rows) {
@@ -539,9 +634,6 @@ globalThis.__neoSchemaReady = true;
           }
         }
         if (ip && ip !== 'unknown') {
-          const ipRow = await env.DB.prepare(
-            `SELECT COUNT(*) as c, MIN(at) as oldest FROM login_attempts WHERE ip = ? AND ok = 0 AND at >= ?`
-          ).bind(ip, cutoff).first();
           const ipFails = Number(ipRow?.c) || 0;
           if (ipFails >= 20) {
             const retryAfterMin = Math.max(1, Math.ceil(((Number(ipRow?.oldest) || Date.now()) + LOGIN_WINDOW_MS - Date.now()) / 60000));
@@ -623,7 +715,12 @@ globalThis.__neoSchemaReady = true;
         } catch (_) {}
         return { token, user, privileges: {}, isAdmin: true, isSuperAdmin: true, tenantId: 'platform' };
       }
-      const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(row.userId).first();
+      const sessionTid = row.tenantId || 'tenant-default';
+      const [user, prefRolesRes, prefTen] = await Promise.all([
+        env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(row.userId).first(),
+        env.DB.prepare('SELECT name, privileges FROM roles WHERE tenantId = ?').bind(sessionTid).all().catch(() => ({ results: [] })),
+        (sessionTid !== 'platform') ? getTenant(sessionTid) : Promise.resolve(null)
+      ]);
       if (!user || user.status !== 'Active') return null;
       // Tenant on session must match user tenant (prevent session fixation across tenants)
       const userTid = user.tenantId || 'tenant-default';
@@ -631,22 +728,22 @@ globalThis.__neoSchemaReady = true;
         try { await env.DB.prepare('DELETE FROM api_sessions WHERE token = ?').bind(token).run(); } catch (_) {}
         return null;
       }
+      const roleTenantId = row.tenantId || user.tenantId || 'tenant-default';
       let roleRow = null;
       try {
-        const roleTenantId = row.tenantId || user.tenantId || 'tenant-default';
-        const roles = (await env.DB.prepare('SELECT * FROM roles WHERE tenantId = ?').bind(roleTenantId).all()).results || [];
+        const roles = (roleTenantId === sessionTid)
+          ? (prefRolesRes?.results || [])
+          : ((await env.DB.prepare('SELECT name, privileges FROM roles WHERE tenantId = ?').bind(roleTenantId).all()).results || []);
         roleRow = roles.find(r => (r.name || '').toLowerCase() === (user.role || '').toLowerCase()) || null;
       } catch (_) {}
       const privileges = parsePrivileges(roleRow?.privileges);
-      // Only the explicit Admin role grants tenant-admin bypass. Individual tab privileges must never elevate a user.
       const isAdmin = (user.role || '').toLowerCase() === 'admin';
-      // Platform super-admin access is reserved for platform-issued sessions, not a tenant-assigned role.
       const isSuperAdmin = row.tenantId === 'platform' && (row.userId === 'super-platform' || user.tenantId === 'platform');
       const tenantId = isSuperAdmin ? (row.tenantId || user.tenantId || null) : (row.tenantId || user.tenantId || 'tenant-default');
       // Enforce tenant status on every request (suspend/pending/deleted kill active sessions)
       if (!isSuperAdmin && tenantId && tenantId !== 'platform') {
         try {
-          const ten = await getTenant(tenantId);
+          const ten = (tenantId === sessionTid && prefTen !== undefined) ? prefTen : await getTenant(tenantId);
           if (ten) {
             const st = (ten.status || '').toLowerCase();
             if (st === 'pending' || st === 'suspended' || st === 'deleted' || st === 'archived') {
@@ -719,6 +816,7 @@ globalThis.__neoSchemaReady = true;
     ];
 
     const ensureLedgerTables = async () => {
+      if (globalThis.__neoLedgerReady && globalThis.__neoLedgerDb === env.DB) return;
       try {
         await env.DB.prepare(`CREATE TABLE IF NOT EXISTS chart_of_accounts (
           id TEXT PRIMARY KEY,
@@ -807,6 +905,8 @@ globalThis.__neoSchemaReady = true;
       try { await env.DB.prepare(`ALTER TABLE journals ADD COLUMN voidedBy TEXT`).run(); } catch (_) {}
       try { await env.DB.prepare(`ALTER TABLE journals ADD COLUMN reversalOf TEXT`).run(); } catch (_) {}
       try { await env.DB.prepare(`ALTER TABLE journals ADD COLUMN manual INTEGER DEFAULT 0`).run(); } catch (_) {}
+      globalThis.__neoLedgerDb = env.DB;
+      globalThis.__neoLedgerReady = true;
     };
 
     const bookBalanceForAccount = async (tid, accountCode) => {
@@ -839,17 +939,33 @@ globalThis.__neoSchemaReady = true;
     };
 
     const ensureDefaultChart = async (tenantId) => {
-      await ensureLedgerTables();
       const tid = tenantId || 'tenant-default';
+      globalThis.__neoChartTenants = globalThis.__neoChartTenants || new Set();
+      if (globalThis.__neoChartTenants.has(tid)) return;
+      await ensureLedgerTables();
       const existing = await env.DB.prepare(`SELECT COUNT(*) as c FROM chart_of_accounts WHERE tenantId = ?`).bind(tid).first();
-      if ((Number(existing?.c) || 0) > 0) return;
-      for (const a of DEFAULT_ACCOUNTS) {
-        try {
-          await env.DB.prepare(
-            `INSERT INTO chart_of_accounts (id, tenantId, code, name, type, active) VALUES (?, ?, ?, ?, ?, 1)`
-          ).bind(tid + '-' + a.code, tid, a.code, a.name, a.type).run();
-        } catch (_) {}
+      if ((Number(existing?.c) || 0) > 0) {
+        globalThis.__neoChartTenants.add(tid);
+        return;
       }
+      try {
+        await env.DB.batch(
+          DEFAULT_ACCOUNTS.map(a =>
+            env.DB.prepare(
+              `INSERT OR IGNORE INTO chart_of_accounts (id, tenantId, code, name, type, active) VALUES (?, ?, ?, ?, ?, 1)`
+            ).bind(tid + '-' + a.code, tid, a.code, a.name, a.type)
+          )
+        );
+      } catch (_) {
+        for (const a of DEFAULT_ACCOUNTS) {
+          try {
+            await env.DB.prepare(
+              `INSERT INTO chart_of_accounts (id, tenantId, code, name, type, active) VALUES (?, ?, ?, ?, ?, 1)`
+            ).bind(tid + '-' + a.code, tid, a.code, a.name, a.type).run();
+          } catch (__) {}
+        }
+      }
+      globalThis.__neoChartTenants.add(tid);
     };
 
     /** Post a balanced journal. lines: [{ accountCode, debit, credit, memo }] */
@@ -887,36 +1003,40 @@ globalThis.__neoSchemaReady = true;
         }
         const jid = opts.id || ('jnl-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7));
         const createdBy = (auth && auth.user && auth.user.name) || 'system';
-        try {
-          await env.DB.prepare(
-            `INSERT INTO journals (id, tenantId, branchId, sourceType, sourceId, description, entryDate, createdAt, createdBy, manual, voided, reversalOf)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
-          ).bind(
-            jid, tid, opts.branchId || '', opts.sourceType || '', String(opts.sourceId || ''),
-            opts.description || '', entryDate, Date.now(), createdBy,
-            opts.manual ? 1 : 0, opts.reversalOf || ''
-          ).run();
-        } catch (_) {
-          await env.DB.prepare(
-            `INSERT INTO journals (id, tenantId, branchId, sourceType, sourceId, description, entryDate, createdAt, createdBy)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).bind(
-            jid, tid, opts.branchId || '', opts.sourceType || '', String(opts.sourceId || ''),
-            opts.description || '', entryDate, Date.now(), createdBy
-          ).run();
-        }
-        let li = 0;
-        for (const l of lines) {
-          li += 1;
-          await env.DB.prepare(
+        const lineStmts = lines.map((l, idx) =>
+          env.DB.prepare(
             `INSERT INTO journal_lines (id, journalId, tenantId, accountCode, debit, credit, memo)
              VALUES (?, ?, ?, ?, ?, ?, ?)`
           ).bind(
-            jid + '-L' + li, jid, tid, String(l.accountCode),
+            jid + '-L' + (idx + 1), jid, tid, String(l.accountCode),
             Math.round((Number(l.debit) || 0) * 100) / 100,
             Math.round((Number(l.credit) || 0) * 100) / 100,
             l.memo || ''
-          ).run();
+          )
+        );
+        try {
+          await env.DB.batch([
+            env.DB.prepare(
+              `INSERT INTO journals (id, tenantId, branchId, sourceType, sourceId, description, entryDate, createdAt, createdBy, manual, voided, reversalOf)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
+            ).bind(
+              jid, tid, opts.branchId || '', opts.sourceType || '', String(opts.sourceId || ''),
+              opts.description || '', entryDate, Date.now(), createdBy,
+              opts.manual ? 1 : 0, opts.reversalOf || ''
+            ),
+            ...lineStmts
+          ]);
+        } catch (_) {
+          await env.DB.batch([
+            env.DB.prepare(
+              `INSERT INTO journals (id, tenantId, branchId, sourceType, sourceId, description, entryDate, createdAt, createdBy)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(
+              jid, tid, opts.branchId || '', opts.sourceType || '', String(opts.sourceId || ''),
+              opts.description || '', entryDate, Date.now(), createdBy
+            ),
+            ...lineStmts
+          ]);
         }
         return jid;
       } catch (e) {
@@ -1033,14 +1153,23 @@ globalThis.__neoSchemaReady = true;
       });
     };
 
-    /** Customer receipt: pay-down of credit/layby AR */
-    const journalCustomerReceipt = async (auth, sale, payAmount, method, branchId, receiptKey) => {
-      const amt = Number(payAmount) || 0;
-      if (amt <= 0) return null;
-      const lines = [
-        { accountCode: cashAccountForMethod(method), debit: amt, credit: 0, memo: 'Customer receipt' },
-        { accountCode: '1100', debit: 0, credit: amt, memo: 'AR pay-down ' + (sale.customerName || sale.id || '') }
-      ];
+    /** Customer receipt: pay-down of credit/layby AR (plus optional excess to customer credit balance) */
+    const journalCustomerReceipt = async (auth, sale, payAmount, method, branchId, receiptKey, excessCredit = 0) => {
+      const amt = Math.round((Number(payAmount) || 0) * 100) / 100;
+      const excess = Math.round(Math.max(0, Number(excessCredit) || 0) * 100) / 100;
+      if (amt <= 0 && excess <= 0) return null;
+      const isAcctCredit = String(method || '').toLowerCase().includes('account credit');
+      const lines = [];
+      if (amt > 0) {
+        lines.push({ accountCode: isAcctCredit ? '2200' : cashAccountForMethod(method), debit: amt + (isAcctCredit ? 0 : excess), credit: 0, memo: isAcctCredit ? 'Applied customer account credit' : 'Customer receipt' });
+        lines.push({ accountCode: '1100', debit: 0, credit: amt, memo: 'AR pay-down ' + (sale.customerName || sale.id || '') });
+        if (excess > 0 && !isAcctCredit) {
+          lines.push({ accountCode: '2200', debit: 0, credit: excess, memo: 'Excess credited to customer account' });
+        }
+      } else if (excess > 0) {
+        lines.push({ accountCode: cashAccountForMethod(method), debit: excess, credit: 0, memo: 'Customer deposit' });
+        lines.push({ accountCode: '2200', debit: 0, credit: excess, memo: 'Excess credited to customer account' });
+      }
       return postJournal(auth, {
         sourceType: 'customer-receipt',
         sourceId: receiptKey || (sale.id + '-rcpt-' + amt + '-' + Date.now()),
@@ -1154,6 +1283,7 @@ globalThis.__neoSchemaReady = true;
     // ========== END LEDGER HELPERS ==========
 
     const ensureTenantSettingsSchema = async () => {
+      if (globalThis.__neoTenantSettingsReady && globalThis.__neoTenantSettingsDb === env.DB) return;
       try {
         await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tenant_settings (
           id TEXT PRIMARY KEY, tenantId TEXT UNIQUE, paymentMethods TEXT, salesTerms TEXT,
@@ -1164,6 +1294,8 @@ globalThis.__neoSchemaReady = true;
       for (const col of ['tasks TEXT', 'cashups TEXT', 'auditLog TEXT', 'itemVariances TEXT', 'poApprovalLimit REAL DEFAULT 0', 'returnRequests TEXT', 'creditPolicy TEXT DEFAULT \'warn\'', 'wizardCompleted INTEGER DEFAULT 1']) {
         try { await env.DB.prepare(`ALTER TABLE tenant_settings ADD COLUMN ${col}`).run(); } catch (_) {}
       }
+      globalThis.__neoTenantSettingsDb = env.DB;
+      globalThis.__neoTenantSettingsReady = true;
     };
 
     const appendTenantAuditRecord = async (tid, userName, action, entity, detail, customEntry = null) => {
@@ -1258,8 +1390,9 @@ globalThis.__neoSchemaReady = true;
         return json({ error: 'Account is inactive' }, 403);
       }
       const loginTenantId = user.tenantId || 'tenant-default';
+      let ten = null;
       try {
-        const ten = await getTenant(loginTenantId);
+        ten = await getTenant(loginTenantId);
         if (ten) {
           const st = (ten.status || '').toLowerCase();
           if (st === 'pending') {
@@ -1282,64 +1415,90 @@ globalThis.__neoSchemaReady = true;
       if (!isHashedPin(user.pin)) {
         try {
           const hashed = await hashPin(pin);
-          await env.DB.prepare('UPDATE users SET pin = ? WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = \'\')').bind(hashed, user.id, user.tenantId || 'tenant-default').run();
+          await env.DB.prepare('UPDATE users SET pin = ? WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = \'\')').bind(hashed, user.id, loginTenantId).run();
           user.pin = hashed;
         } catch (_) {}
       }
 
-      await recordLoginAttempt(name, true);
-
       const tokenBytes = randomBytes(32);
       const token = b64(tokenBytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
       const expiresAt = Date.now() + SESSION_MS;
-      // Optional: drop other sessions for this user (single session)
-      try { await env.DB.prepare('DELETE FROM api_sessions WHERE userId = ?').bind(user.id).run(); } catch (_) {}
-      const userTenantId = user.tenantId || 'tenant-default';
-      try {
-        await env.DB.prepare(
-          'INSERT INTO api_sessions (token, userId, expiresAt, createdAt, ip, tenantId) VALUES (?, ?, ?, ?, ?, ?)'
-        ).bind(token, user.id, expiresAt, Date.now(), clientIp(), userTenantId).run();
-      } catch (e1) {
+      const userTenantId = loginTenantId;
+      const nowSession = Date.now();
+      const loginIp = clientIp();
+      const isAdminRole = (user.role || '').toLowerCase() === 'admin';
+
+      const replaceSession = async () => {
+        try { await env.DB.prepare('DELETE FROM api_sessions WHERE userId = ?').bind(user.id).run(); } catch (_) {}
         try {
           await env.DB.prepare(
-            'INSERT INTO api_sessions (token, userId, expiresAt, tenantId) VALUES (?, ?, ?, ?)'
-          ).bind(token, user.id, expiresAt, userTenantId).run();
-        } catch (e2) {
-          await env.DB.prepare(
-            'INSERT INTO api_sessions (token, userId, expiresAt) VALUES (?, ?, ?)'
-          ).bind(token, user.id, expiresAt).run();
+            'INSERT INTO api_sessions (token, userId, expiresAt, createdAt, ip, tenantId) VALUES (?, ?, ?, ?, ?, ?)'
+          ).bind(token, user.id, expiresAt, nowSession, loginIp, userTenantId).run();
+        } catch (e1) {
+          try {
+            await env.DB.prepare(
+              'INSERT INTO api_sessions (token, userId, expiresAt, createdAt, tenantId) VALUES (?, ?, ?, ?, ?)'
+            ).bind(token, user.id, expiresAt, nowSession, userTenantId).run();
+          } catch (e2) {
+            await env.DB.prepare(
+              'INSERT INTO api_sessions (token, userId, expiresAt) VALUES (?, ?, ?)'
+            ).bind(token, user.id, expiresAt).run();
+          }
         }
-      }
+      };
 
-      let roleRow = null;
-      try {
-        const roleTenantId = user.tenantId || 'tenant-default';
-        const roles = (await env.DB.prepare('SELECT * FROM roles WHERE tenantId = ?').bind(roleTenantId).all()).results || [];
-        roleRow = roles.find(r => (r.name || '').toLowerCase() === (user.role || '').toLowerCase()) || null;
-      } catch (_) {}
-      const tenant = await getTenant(user.tenantId || 'tenant-default');
-      try {
-        await appendTenantAuditRecord(userTenantId, user.name, 'login', 'session', `User signed in (${user.role || 'Staff'})`);
-        await writeSecurityAudit({ user, tenantId: userTenantId }, 'login', 'session', user.name);
-      } catch (_) {}
-      let loginShopProfile = null;
-      try {
-        const pTid = user.tenantId || 'tenant-default';
-        loginShopProfile = await env.DB.prepare('SELECT * FROM shop_profile WHERE tenantId = ? OR id = ? LIMIT 1').bind(pTid, pTid).first();
-        if (!loginShopProfile && pTid === 'tenant-default') loginShopProfile = await env.DB.prepare('SELECT * FROM shop_profile WHERE id = 1').first();
-      } catch (_) {}
+      const fetchRole = async () => {
+        try {
+          const roles = (await env.DB.prepare('SELECT name, privileges FROM roles WHERE tenantId = ?').bind(userTenantId).all()).results || [];
+          return roles.find(r => (r.name || '').toLowerCase() === (user.role || '').toLowerCase()) || null;
+        } catch (_) { return null; }
+      };
+
+      const fetchShopProfile = async () => {
+        try {
+          let sp = await env.DB.prepare('SELECT * FROM shop_profile WHERE tenantId = ? OR id = ? LIMIT 1').bind(userTenantId, userTenantId).first();
+          if (!sp && userTenantId === 'tenant-default') sp = await env.DB.prepare('SELECT * FROM shop_profile WHERE id = 1').first();
+          return sp || null;
+        } catch (_) { return null; }
+      };
+
+      const fetchWizard = async () => {
+        if (!isAdminRole) return false;
+        try {
+          const tsRow = await env.DB.prepare(`SELECT wizardCompleted FROM tenant_settings WHERE tenantId = ? LIMIT 1`).bind(userTenantId).first();
+          return !!(tsRow && tsRow.wizardCompleted !== null && tsRow.wizardCompleted !== undefined && Number(tsRow.wizardCompleted) === 0);
+        } catch (_) { return false; }
+      };
+
+      const fetchBranches = async () => {
+        try {
+          let rows = await listBranches(userTenantId);
+          if (!rows.length) {
+            await ensureDefaultBranch(userTenantId);
+            rows = await listBranches(userTenantId);
+          }
+          return rows;
+        } catch (_) { return []; }
+      };
+
       let userAllowedBr = user.allowedBranches;
       try { if (typeof userAllowedBr === 'string') userAllowedBr = JSON.parse(userAllowedBr || '[]'); } catch (_) { userAllowedBr = []; }
-      let needsBusinessWizard = false;
-      if ((user.role || '').toLowerCase() === 'admin') {
-        try {
-          await ensureTenantSettingsSchema();
-          const tsRow = await env.DB.prepare(`SELECT wizardCompleted FROM tenant_settings WHERE tenantId = ? LIMIT 1`).bind(userTenantId).first();
-          if (tsRow && tsRow.wizardCompleted !== null && tsRow.wizardCompleted !== undefined && Number(tsRow.wizardCompleted) === 0) {
-            needsBusinessWizard = true;
-          }
-        } catch (_) {}
-      }
+      const loginAllowedArr = Array.isArray(userAllowedBr) ? userAllowedBr : (userAllowedBr ? [userAllowedBr] : []);
+
+      const [, , roleRow, loginShopProfile, needsBusinessWizard, loginBranches] = await Promise.all([
+        recordLoginAttempt(name, true).catch(() => {}),
+        replaceSession(),
+        fetchRole(),
+        fetchShopProfile(),
+        fetchWizard(),
+        fetchBranches(),
+        writeSecurityAudit({ user, tenantId: userTenantId }, 'login', 'session', user.name).catch(() => {})
+      ]);
+
+      try {
+        await appendTenantAuditRecord(userTenantId, user.name, 'login', 'session', `User signed in (${user.role || 'Staff'})`);
+      } catch (_) {}
+
       return json({
         token,
         expiresAt,
@@ -1350,12 +1509,13 @@ globalThis.__neoSchemaReady = true;
           status: user.status, 
           phone: user.phone || '', 
           photo: user.photo || '', 
-          allowedBranches: Array.isArray(userAllowedBr) ? userAllowedBr : (userAllowedBr ? [userAllowedBr] : []),
-          tenantId: user.tenantId || 'tenant-default' 
+          allowedBranches: loginAllowedArr,
+          tenantId: userTenantId 
         },
         privileges: parsePrivileges(roleRow?.privileges),
-        tenant: tenant ? { id: tenant.id, name: tenant.name, plan: tenant.plan, status: tenant.status, maxUsers: tenant.maxUsers, maxBranches: tenant.maxBranches } : null,
+        tenant: ten ? { id: ten.id, name: ten.name, plan: ten.plan, status: ten.status, maxUsers: ten.maxUsers, maxBranches: ten.maxBranches } : null,
         shopProfile: loginShopProfile || null,
+        branches: loginBranches || [],
         needsBusinessWizard
       });
     }
@@ -2258,7 +2418,8 @@ globalThis.__neoSchemaReady = true;
         }
         return env.DB.prepare(`SELECT * FROM ${table} WHERE tenantId = ?${limSql}`).bind(tidForQuery).all().then(res => res.results || []).catch(() => []);
       };
-      let [inventory, sales, customers, expenses, categories, expenseCategories, itemStatuses, users, roles, suppliers, purchaseOrders, shopProfileRes, employees, leaveRequests, payrollRecords, hrSettingsRes, taxSettingsRes] = await Promise.all([
+      const tidBranches = (auth && auth.tenantId) || 'tenant-default';
+      let [inventory, sales, customers, expenses, categories, expenseCategories, itemStatuses, users, roles, suppliers, purchaseOrders, shopProfileRes, employees, leaveRequests, payrollRecords, hrSettingsRes, taxSettingsRes, stockMovementsRes, tenantSettingsRes, branchesRes, tenantRowRes] = await Promise.all([
         qTenant('inventory'),
         qTenant('sales', { limit: 2000 }),
         qTenant('customers'),
@@ -2276,9 +2437,8 @@ globalThis.__neoSchemaReady = true;
         }))),
         (async () => {
           try {
-            const tid = (auth && auth.tenantId) || 'tenant-default';
-            let row = await env.DB.prepare('SELECT * FROM shop_profile WHERE tenantId = ? LIMIT 1').bind(tid).first();
-            if (!row && tid === 'tenant-default') row = await env.DB.prepare('SELECT * FROM shop_profile WHERE id = 1').first();
+            let row = await env.DB.prepare('SELECT * FROM shop_profile WHERE tenantId = ? LIMIT 1').bind(tidBranches).first();
+            if (!row && tidBranches === 'tenant-default') row = await env.DB.prepare('SELECT * FROM shop_profile WHERE id = 1').first();
             return row;
           } catch (_) { return null; }
         })(),
@@ -2287,13 +2447,12 @@ globalThis.__neoSchemaReady = true;
         qTenant('payroll', { limit: 500 }),
         (async () => {
           try {
-            const tid = (auth && auth.tenantId) || 'tenant-default';
             let row = null;
-            try { row = await env.DB.prepare('SELECT * FROM hr_settings_mt WHERE tenantId = ? LIMIT 1').bind(tid).first(); } catch (_) {}
+            try { row = await env.DB.prepare('SELECT * FROM hr_settings_mt WHERE tenantId = ? LIMIT 1').bind(tidBranches).first(); } catch (_) {}
             if (!row) {
-              try { row = await env.DB.prepare('SELECT * FROM hr_settings WHERE tenantId = ? LIMIT 1').bind(tid).first(); } catch (_) {}
+              try { row = await env.DB.prepare('SELECT * FROM hr_settings WHERE tenantId = ? LIMIT 1').bind(tidBranches).first(); } catch (_) {}
             }
-            if (!row && tid === 'tenant-default') {
+            if (!row && tidBranches === 'tenant-default') {
               try { row = await env.DB.prepare('SELECT * FROM hr_settings WHERE id = 1').first(); } catch (_) {}
             }
             return row;
@@ -2301,48 +2460,47 @@ globalThis.__neoSchemaReady = true;
         })(),
         (async () => {
           try {
-            const tid = (auth && auth.tenantId) || 'tenant-default';
             let row = null;
-            try { row = await env.DB.prepare('SELECT * FROM tax_settings_mt WHERE tenantId = ? LIMIT 1').bind(tid).first(); } catch (_) {}
+            try { row = await env.DB.prepare('SELECT * FROM tax_settings_mt WHERE tenantId = ? LIMIT 1').bind(tidBranches).first(); } catch (_) {}
             if (!row) {
-              try { row = await env.DB.prepare('SELECT * FROM tax_settings WHERE tenantId = ? LIMIT 1').bind(tid).first(); } catch (_) {}
+              try { row = await env.DB.prepare('SELECT * FROM tax_settings WHERE tenantId = ? LIMIT 1').bind(tidBranches).first(); } catch (_) {}
             }
-            if (!row && tid === 'tenant-default') {
+            if (!row && tidBranches === 'tenant-default') {
               try { row = await env.DB.prepare('SELECT * FROM tax_settings WHERE id = 1').first(); } catch (_) {}
             }
             return row;
           } catch (_) { return null; }
-        })()
+        })(),
+        env.DB.prepare(`SELECT * FROM stock_movements WHERE tenantId = ? ORDER BY at DESC LIMIT 500`).bind(tidBranches).all().then(r => r.results || []).catch(() => []),
+        env.DB.prepare(`SELECT * FROM tenant_settings WHERE tenantId = ? LIMIT 1`).bind(tidBranches).first().catch(() => null),
+        auth.isSuperAdmin ? Promise.resolve([]) : listBranches(tidBranches).catch(() => []),
+        getTenant(tidBranches).catch(() => null)
       ]);
 
       let shopProfile = shopProfileRes || null;
-      if ((!shopProfile || !shopProfile.name) && auth && auth.tenantId && auth.tenantId !== 'platform') {
-        try {
-          const ten = await getTenant(auth.tenantId);
-          if (ten) {
-            shopProfile = {
-              ...(shopProfile || {}),
-              id: (shopProfile && shopProfile.id) || auth.tenantId,
-              name: (shopProfile && shopProfile.name) || ten.name || '',
-              tagline: (shopProfile && shopProfile.tagline) || '',
-              currency: (shopProfile && shopProfile.currency) || 'KSh',
-              phone: (shopProfile && shopProfile.phone) || '',
-              location: (shopProfile && shopProfile.location) || '',
-              tenantId: auth.tenantId
-            };
-          }
-        } catch (_) {}
+      if ((!shopProfile || !shopProfile.name) && auth && auth.tenantId && auth.tenantId !== 'platform' && tenantRowRes) {
+        shopProfile = {
+          ...(shopProfile || {}),
+          id: (shopProfile && shopProfile.id) || auth.tenantId,
+          name: (shopProfile && shopProfile.name) || tenantRowRes.name || '',
+          tagline: (shopProfile && shopProfile.tagline) || '',
+          currency: (shopProfile && shopProfile.currency) || 'KSh',
+          phone: (shopProfile && shopProfile.phone) || '',
+          location: (shopProfile && shopProfile.location) || '',
+          tenantId: auth.tenantId
+        };
       }
       const hrSettings = hrSettingsRes || null;
       const taxSettings = taxSettingsRes || null;
-      const tidBranches = (auth && auth.tenantId) || 'tenant-default';
-      let branchesList = [];
-      try {
-        if (!auth.isSuperAdmin) {
+      let branchesList = branchesRes || [];
+      if (!auth.isSuperAdmin && branchesList.length === 0) {
+        try {
           await ensureDefaultBranch(tidBranches, shopProfile?.name || shopProfile?.location || 'Main branch');
           branchesList = await listBranches(tidBranches);
-        }
-      } catch (_) {}
+        } catch (_) {}
+      } else if (!auth.isSuperAdmin && branchesList.length > 0 && globalThis.__neoBranchTenants) {
+        globalThis.__neoBranchTenants.add(tidBranches);
+      }
 
       const parseJsonArr = (v) => {
         if (Array.isArray(v)) return v;
@@ -2394,17 +2552,10 @@ globalThis.__neoSchemaReady = true;
         // PIN hashes never sent to the client
       }));
 
-      let stockMovements = [];
-      try {
-        stockMovements = (await env.DB.prepare(
-          `SELECT * FROM stock_movements WHERE tenantId = ? ORDER BY at DESC LIMIT 500`
-        ).bind(auth.tenantId || 'tenant-default').all()).results || [];
-      } catch (_) { stockMovements = []; }
-      let tenantSettings = null;
-      try {
-        await ensureTenantSettingsSchema();
-        tenantSettings = await env.DB.prepare(`SELECT * FROM tenant_settings WHERE tenantId = ? LIMIT 1`).bind(auth.tenantId || 'tenant-default').first();
-      } catch (_) {}
+      const stockMovements = stockMovementsRes || [];
+      const tenantSettings = tenantSettingsRes || null;
+      const planId = tenantRowRes?.plan || 'starter';
+      const lim = PLAN_LIMITS[planId] || PLAN_LIMITS.starter;
 
       return json({
         inventory: can(auth, 'inventory', 'view') || can(auth, 'pos', 'view') ? inventory : [],
@@ -2433,16 +2584,9 @@ globalThis.__neoSchemaReady = true;
         stockMovements,
         tenantSettings,
         needsBusinessWizard: !auth.isSuperAdmin && !!auth.isAdmin && !!tenantSettings && tenantSettings.wizardCompleted !== null && tenantSettings.wizardCompleted !== undefined && Number(tenantSettings.wizardCompleted) === 0,
-        ...await (async () => {
-          const ten = await getTenant(tidBranches);
-          const planId = ten?.plan || 'starter';
-          const lim = PLAN_LIMITS[planId] || PLAN_LIMITS.starter;
-          return {
-            maxBranches: Math.min(MAX_BRANCHES_HARD, Number(ten?.maxBranches) || lim.maxBranches || 1),
-            maxUsers: Number(ten?.maxUsers) || lim.maxUsers || 5,
-            plan: planId
-          };
-        })(),
+        maxBranches: Math.min(MAX_BRANCHES_HARD, Number(tenantRowRes?.maxBranches) || lim.maxBranches || 1),
+        maxUsers: Number(tenantRowRes?.maxUsers) || lim.maxUsers || 5,
+        plan: planId,
         authUser: { id: auth.user.id, name: auth.user.name, role: auth.user.role, photo: auth.user.photo || '' }
       });
     }
@@ -2669,9 +2813,6 @@ globalThis.__neoSchemaReady = true;
     // 3. INVENTORY CRUD
     if (routeType === 'inventory') {
       const tidInv = auth.tenantId || 'tenant-default';
-      for (const col of ['sku TEXT', 'size TEXT', 'colour TEXT', 'wholesalePrice REAL', 'varianceValues TEXT']) {
-        try { await env.DB.prepare(`ALTER TABLE inventory ADD COLUMN ${col}`).run(); } catch (_) {}
-      }
       if (request.method === 'POST') {
         const body = await request.json();
         const qty = Math.max(0, Number(body.quantity) || 0);
@@ -2729,12 +2870,16 @@ globalThis.__neoSchemaReady = true;
       }
       if (request.method === 'DELETE' && id) {
         const delItem = await env.DB.prepare(`SELECT name FROM inventory WHERE id = ? AND tenantId = ?`).bind(id, tidInv).first().catch(() => null);
-        await env.DB.prepare(`DELETE FROM inventory WHERE id = ? AND tenantId = ?`).bind(id, tidInv).run();
-        try { await env.DB.prepare(`DELETE FROM stock_movements WHERE tenantId = ? AND itemId = ?`).bind(tidInv, id).run(); } catch (_) {}
-        try {
-          await writeSecurityAudit(auth, 'delete', routeType, id);
-          await appendTenantAuditRecord(tidInv, auth.user?.name || 'Staff', 'delete', 'inventory', `${delItem?.name || id} (${id})`);
-        } catch (_) {}
+        await env.DB.batch([
+          env.DB.prepare(`DELETE FROM inventory WHERE id = ? AND tenantId = ?`).bind(id, tidInv),
+          env.DB.prepare(`DELETE FROM stock_movements WHERE tenantId = ? AND itemId = ?`).bind(tidInv, id)
+        ]).catch(async () => {
+          await env.DB.prepare(`DELETE FROM inventory WHERE id = ? AND tenantId = ?`).bind(id, tidInv).run();
+        });
+        await Promise.all([
+          writeSecurityAudit(auth, 'delete', routeType, id).catch(() => {}),
+          appendTenantAuditRecord(tidInv, auth.user?.name || 'Staff', 'delete', 'inventory', `${delItem?.name || id} (${id})`).catch(() => {})
+        ]);
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
     }
@@ -2745,13 +2890,6 @@ globalThis.__neoSchemaReady = true;
         const body = await request.json();
         const eligibilityJson = JSON.stringify(body.eligibility || ['Paid']);
         const tid = auth.tenantId || 'tenant-default';
-        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN loyaltyPoints REAL DEFAULT 0`).run(); } catch (_) {}
-        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN creditLimit REAL DEFAULT 0`).run(); } catch (_) {}
-        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN salesTermId TEXT`).run(); } catch (_) {}
-        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN paymentTerm TEXT`).run(); } catch (_) {}
-        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN tags TEXT`).run(); } catch (_) {}
-        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN priceList TEXT`).run(); } catch (_) {}
-        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN kraPin TEXT`).run(); } catch (_) {}
         const creditLimitNum = parseFloat(body.creditLimit) || 0;
         try {
           await env.DB.prepare(
@@ -2774,8 +2912,6 @@ globalThis.__neoSchemaReady = true;
         const body = await request.json();
         const eligibilityJson = JSON.stringify(body.eligibility || ['Paid']);
         const tid = auth.tenantId || 'tenant-default';
-        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN loyaltyPoints REAL DEFAULT 0`).run(); } catch (_) {}
-        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN creditLimit REAL DEFAULT 0`).run(); } catch (_) {}
         const creditLimitNum = parseFloat(body.creditLimit) || 0;
         try {
           await env.DB.prepare(
@@ -2802,26 +2938,16 @@ globalThis.__neoSchemaReady = true;
       }
       if (request.method === 'DELETE' && id) {
         const tid = auth.tenantId || 'tenant-default';
-        await env.DB.prepare(`DELETE FROM customers WHERE id = ? AND tenantId = ?`).bind(id, tid).run();
-        try { await writeSecurityAudit(auth, 'delete', routeType, id); } catch (_) {}
+        await Promise.all([
+          env.DB.prepare(`DELETE FROM customers WHERE id = ? AND tenantId = ?`).bind(id, tid).run(),
+          writeSecurityAudit(auth, 'delete', routeType, id).catch(() => {})
+        ]);
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
     }
 
     // 5. EXPENSES CRUD
     if (routeType === 'expenses') {
-      try {
-        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS expenses (
-          id TEXT PRIMARY KEY, date TEXT, category TEXT, description TEXT, amount REAL,
-          paymentMethod TEXT, mpesaCode TEXT, payer TEXT, paidTo TEXT,
-          paidAmount REAL, balanceDue REAL, paymentStatus TEXT, taxAmount REAL
-        )`).run();
-      } catch (_) {}
-      try { await env.DB.prepare(`ALTER TABLE expenses ADD COLUMN paidAmount REAL`).run(); } catch (_) {}
-      try { await env.DB.prepare(`ALTER TABLE expenses ADD COLUMN balanceDue REAL`).run(); } catch (_) {}
-      try { await env.DB.prepare(`ALTER TABLE expenses ADD COLUMN paymentStatus TEXT`).run(); } catch (_) {}
-      try { await env.DB.prepare(`ALTER TABLE expenses ADD COLUMN taxAmount REAL`).run(); } catch (_) {}
-      try { await env.DB.prepare(`ALTER TABLE expenses ADD COLUMN paymentHistory TEXT`).run(); } catch (_) {}
       if (request.method === 'POST') {
         const body = await request.json();
         const amount = parseFloat(body.amount) || 0;
@@ -2852,10 +2978,12 @@ globalThis.__neoSchemaReady = true;
             ).bind(body.id, body.date, body.category, body.description, amount, body.paymentMethod, body.mpesaCode || '', body.payer || '', body.paidTo || '', tid).run();
           }
         }
-        try { await journalExpense(auth, { ...body, amount, paidAmount, balanceDue, paymentStatus }, branchId); } catch (_) {}
-        if (paidAmount > 0) {
-          try { await appendTenantAuditRecord(tid, auth.user?.name || body.payer || 'Staff', 'payment', 'expense', `${body.description || body.category} — Paid ${paidAmount} via ${body.paymentMethod || 'Cash'}`); } catch (_) {}
-        }
+        await Promise.all([
+          journalExpense(auth, { ...body, amount, paidAmount, balanceDue, paymentStatus }, branchId).catch(() => {}),
+          paidAmount > 0
+            ? appendTenantAuditRecord(tid, auth.user?.name || body.payer || 'Staff', 'payment', 'expense', `${body.description || body.category} — Paid ${paidAmount} via ${body.paymentMethod || 'Cash'}`).catch(() => {})
+            : Promise.resolve(null)
+        ]);
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
       if (request.method === 'PUT' && id) {
@@ -2892,27 +3020,17 @@ globalThis.__neoSchemaReady = true;
       if (request.method === 'DELETE' && id) {
         const tid = auth.tenantId || 'tenant-default';
         const delExp = await env.DB.prepare(`SELECT description, category, amount FROM expenses WHERE id = ? AND tenantId = ?`).bind(id, tid).first().catch(() => null);
-        await env.DB.prepare(`DELETE FROM expenses WHERE id = ? AND tenantId = ?`).bind(id, tid).run();
-        try {
-          await writeSecurityAudit(auth, 'delete', routeType, id);
-          await appendTenantAuditRecord(tid, auth.user?.name || 'Staff', 'delete', 'expense', `${delExp?.description || delExp?.category || id} (${id})`);
-        } catch (_) {}
+        await Promise.all([
+          env.DB.prepare(`DELETE FROM expenses WHERE id = ? AND tenantId = ?`).bind(id, tid).run(),
+          writeSecurityAudit(auth, 'delete', routeType, id).catch(() => {}),
+          appendTenantAuditRecord(tid, auth.user?.name || 'Staff', 'delete', 'expense', `${delExp?.description || delExp?.category || id} (${id})`).catch(() => {})
+        ]);
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
     }
 
     // 6. SALES CRUD
     if (routeType === 'sales') {
-      try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN returnHistory TEXT').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN paymentHistory TEXT').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN taxInclusive INTEGER DEFAULT 0').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN originalSaleType TEXT').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN branchId TEXT').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN subtotal REAL').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN taxAmount REAL').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN taxRate REAL').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN taxName TEXT').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN tenantId TEXT').run(); } catch (_) {}
       if (request.method === 'POST') {
         const body = await request.json();
         if (!body || !body.id) return json({ error: 'Sale id is required' }, 400);
@@ -2922,87 +3040,128 @@ globalThis.__neoSchemaReady = true;
         } catch (_) { saleItems = []; }
         const itemsJson = JSON.stringify(saleItems);
         const tenantId = auth.tenantId || 'tenant-default';
-        let branchId = null;
-        try {
-          branchId = await resolveBranchId(tenantId, (body.branchId && body.branchId !== 'all') ? body.branchId : requestBranchId());
-        } catch (_) { branchId = body.branchId && body.branchId !== 'all' ? body.branchId : null; }
-        // Branch gate: only hard-fail if user has an explicit allow-list that excludes this branch
+        const idemKey = String(body.idempotencyKey || body.id || '').trim();
+        const [resolvedBr, existingSale] = await Promise.all([
+          resolveBranchId(tenantId, (body.branchId && body.branchId !== 'all') ? body.branchId : requestBranchId()).catch(() => (body.branchId && body.branchId !== 'all' ? body.branchId : null)),
+          env.DB.prepare(`SELECT id, branchId FROM sales WHERE tenantId = ? AND (id = ? OR (? != '' AND idempotencyKey = ?)) LIMIT 1`).bind(tenantId, body.id, idemKey, idemKey).first().catch(() => null)
+        ]);
+        const branchId = resolvedBr;
         try {
           if (branchId && !branchAllowedForAuth(auth, branchId)) {
             return json({ error: 'Not allowed to post sales for this location.' }, 403);
           }
         } catch (_) {}
+        if (existingSale && existingSale.id) {
+          return json({ success: true, id: existingSale.id, deduplicated: true, stockAdjusted: 0 });
+        }
 
         const tracks = (v) => v === true || v === 1 || v === '1' || v === 'true';
+        const candidateItems = saleItems.filter(it => tracks(it.trackInventory) && it.id && (Number(it.qty) || 0) > 0);
+        const stockRows = candidateItems.length > 0
+          ? await Promise.all(candidateItems.map(item =>
+              env.DB.prepare(
+                `SELECT id, quantity, name, tenantId, locationQuantities, allLocations, allowedBranches, branchId FROM inventory WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') LIMIT 1`
+              ).bind(item.id, tenantId).first().catch(() =>
+                env.DB.prepare(`SELECT id, quantity, name FROM inventory WHERE id = ? LIMIT 1`).bind(item.id).first().catch(() => null)
+              )
+            ))
+          : [];
+
         const trackedLines = [];
-        for (const item of saleItems) {
-          if (!tracks(item.trackInventory) || !item.id) continue;
+        for (let ci = 0; ci < candidateItems.length; ci++) {
+          const item = candidateItems[ci];
           const qty = Math.max(0, Number(item.qty) || 0);
-          if (qty <= 0) continue;
-          let stock = null;
-          try {
-            stock = await env.DB.prepare(
-              `SELECT id, quantity, name, tenantId FROM inventory WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') LIMIT 1`
-            ).bind(item.id, tenantId).first();
-          } catch (_) {
-            try {
-              stock = await env.DB.prepare(`SELECT id, quantity, name FROM inventory WHERE id = ? LIMIT 1`).bind(item.id).first();
-            } catch (__) {}
-          }
+          const stock = stockRows[ci];
           if (!stock) {
-            // Do not block the whole sale for a missing catalog row — skip stock movement
             console.log('sale: inventory row missing', item.id);
             continue;
           }
-          const available = Number(stock.quantity) || 0;
-          if (available < qty) {
-            return json({ error: `Insufficient stock for ${item.name || stock.name || item.id}. Available: ${available}; requested: ${qty}.` }, 409);
+          let locQ = {};
+          try { locQ = typeof stock.locationQuantities === 'string' ? JSON.parse(stock.locationQuantities || '{}') : (stock.locationQuantities || {}); } catch (_) { locQ = {}; }
+          if (!locQ || typeof locQ !== 'object' || Array.isArray(locQ)) locQ = {};
+          let allowedBrs = [];
+          try { allowedBrs = typeof stock.allowedBranches === 'string' ? JSON.parse(stock.allowedBranches || '[]') : (stock.allowedBranches || []); } catch (_) { allowedBrs = []; }
+          const usesLocMap = Boolean(branchId && (stock.allLocations === 1 || stock.allLocations === true || (Array.isArray(allowedBrs) && allowedBrs.length > 0) || Object.keys(locQ).length > 0));
+          if (!usesLocMap && branchId && stock.branchId && String(stock.branchId) !== String(branchId)) {
+            return json({ error: `Stock item ${item.name || stock.name || item.id} belongs to another location and cannot be sold from this branch.` }, 409);
           }
-          trackedLines.push({ id: item.id, qty, name: item.name || stock.name || item.id, before: available });
+          let available = Number(stock.quantity) || 0;
+          if (usesLocMap) {
+            if (locQ[branchId] !== undefined && locQ[branchId] !== null && locQ[branchId] !== '') {
+              available = Number(locQ[branchId]) || 0;
+            } else if (Object.keys(locQ).length === 0 && (stock.allLocations === 1 || stock.allLocations === true || !stock.branchId || stock.branchId === branchId)) {
+              available = Number(stock.quantity) || 0;
+            } else if (stock.branchId === branchId) {
+              available = Number(stock.quantity) || 0;
+            } else {
+              available = 0;
+            }
+          }
+          if (available < qty) {
+            return json({ error: `Insufficient stock for ${item.name || stock.name || item.id}. Available at this location: ${available}; requested: ${qty}.` }, 409);
+          }
+          trackedLines.push({ id: item.id, qty, name: item.name || stock.name || item.id, before: available, usesLocMap, prevLocQ: { ...locQ }, prevQty: Number(stock.quantity) || 0, stockBranchId: stock.branchId || '' });
         }
 
-        // Decrement stock (best effort; verify qty)
-        for (let i = 0; i < trackedLines.length; i++) {
-          const t = trackedLines[i];
+        // Decrement stock in a single batch (verify changes & exact location branchId)
+        if (trackedLines.length > 0) {
+          const stockStmts = trackedLines.map(t => {
+            if (t.usesLocMap && branchId) {
+              const nextLocQ = { ...t.prevLocQ, [branchId]: Math.max(0, t.before - t.qty) };
+              const nextTotalQty = Object.keys(t.prevLocQ).length > 0
+                ? Object.values(nextLocQ).reduce((s, v) => s + Math.max(0, Number(v) || 0), 0)
+                : Math.max(0, t.prevQty - t.qty);
+              const nextLocQJson = JSON.stringify(nextLocQ);
+              return env.DB.prepare(
+                `UPDATE inventory SET quantity = ?, locationQuantities = ?, status = CASE WHEN ? <= 0 THEN 'Sold' ELSE status END
+                 WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '')`
+              ).bind(nextTotalQty, nextLocQJson, nextTotalQty, t.id, tenantId);
+            }
+            const sqlNonShared = branchId
+              ? `UPDATE inventory SET quantity = quantity - ?, status = CASE WHEN quantity - ? <= 0 THEN 'Sold' ELSE status END WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') AND (branchId = ? OR branchId IS NULL OR branchId = '') AND quantity >= ?`
+              : `UPDATE inventory SET quantity = quantity - ?, status = CASE WHEN quantity - ? <= 0 THEN 'Sold' ELSE status END WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') AND quantity >= ?`;
+            return branchId
+              ? env.DB.prepare(sqlNonShared).bind(t.qty, t.qty, t.id, tenantId, branchId, t.qty)
+              : env.DB.prepare(sqlNonShared).bind(t.qty, t.qty, t.id, tenantId, t.qty);
+          });
+          let batchRes = [];
           try {
-            const result = await env.DB.prepare(
-              `UPDATE inventory SET quantity = quantity - ?, status = CASE WHEN quantity - ? <= 0 THEN 'Sold' ELSE status END
-               WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') AND quantity >= ?`
-            ).bind(t.qty, t.qty, t.id, tenantId, t.qty).run();
-            const changes = result && result.meta != null && result.meta.changes != null ? Number(result.meta.changes) : null;
-            if (changes === 0) {
-              for (let j = 0; j < i; j++) {
-                try {
-                  await env.DB.prepare(
-                    `UPDATE inventory SET quantity = quantity + ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '')`
-                  ).bind(trackedLines[j].qty, trackedLines[j].id, tenantId).run();
-                } catch (_) {}
-              }
-              return json({ error: `Insufficient stock for ${t.name} (concurrent sale). Refresh and try again.` }, 409);
-            }
+            batchRes = await env.DB.batch(stockStmts);
           } catch (e) {
-            // Fallback update without tenant filter
-            try {
-              await env.DB.prepare(
-                `UPDATE inventory SET quantity = quantity - ? WHERE id = ? AND quantity >= ?`
-              ).bind(t.qty, t.id, t.qty).run();
-            } catch (e2) {
-              for (let j = 0; j < i; j++) {
-                try {
-                  await env.DB.prepare(`UPDATE inventory SET quantity = quantity + ? WHERE id = ?`).bind(trackedLines[j].qty, trackedLines[j].id).run();
-                } catch (_) {}
+            return json({ error: `Stock update failed: ${(e && e.message) || 'db'}` }, 500);
+          }
+          const failedIdx = batchRes.findIndex(r => r && r.meta != null && r.meta.changes === 0);
+          if (failedIdx >= 0) {
+            const rollbackStmts = [];
+            for (let j = 0; j < trackedLines.length; j++) {
+              const ch = batchRes[j] && batchRes[j].meta != null ? Number(batchRes[j].meta.changes) : 1;
+              if (ch > 0) {
+                const prevT = trackedLines[j];
+                if (prevT.usesLocMap && branchId) {
+                  rollbackStmts.push(env.DB.prepare(`UPDATE inventory SET quantity = ?, locationQuantities = ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ?`).bind(prevT.prevQty, JSON.stringify(prevT.prevLocQ), prevT.id));
+                } else {
+                  rollbackStmts.push(env.DB.prepare(`UPDATE inventory SET quantity = quantity + ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '')`).bind(prevT.qty, prevT.id, tenantId));
+                }
               }
-              return json({ error: `Stock update failed for ${t.name}: ${(e2 && e2.message) || (e && e.message) || 'db'}` }, 500);
             }
+            if (rollbackStmts.length) await env.DB.batch(rollbackStmts).catch(() => {});
+            const failedLine = trackedLines[failedIdx];
+            return json({ error: `Insufficient stock for ${failedLine.name} at this branch (or concurrent sale). Refresh and try again.` }, 409);
           }
         }
 
         const restoreStock = async () => {
           for (const t of trackedLines) {
             try {
-              await env.DB.prepare(
-                `UPDATE inventory SET quantity = quantity + ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ?`
-              ).bind(t.qty, t.id).run();
+              if (t.usesLocMap && branchId) {
+                await env.DB.prepare(
+                  `UPDATE inventory SET quantity = ?, locationQuantities = ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ?`
+                ).bind(t.prevQty, JSON.stringify(t.prevLocQ), t.id).run();
+              } else {
+                await env.DB.prepare(
+                  `UPDATE inventory SET quantity = quantity + ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ?`
+                ).bind(t.qty, t.id).run();
+              }
             } catch (_) {}
           }
         };
@@ -3039,6 +3198,10 @@ globalThis.__neoSchemaReady = true;
         let saleInserted = false;
         let lastErr = null;
         const attempts = [
+          async () => env.DB.prepare(
+            `INSERT INTO sales (id, date, customerName, saleType, items, totalAmount, paymentMethod, mpesaCode, cashier, paidAmount, balanceDue, deadline, subtotal, taxAmount, taxRate, taxName, tenantId, taxInclusive, branchId, paymentHistory, idempotencyKey)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(vals.id, vals.date, vals.customerName, vals.saleType, vals.itemsJson, vals.totalAmount, vals.paymentMethod, vals.mpesaCode, vals.cashier, vals.paidAmount, vals.balanceDue, vals.deadline, vals.subtotal, vals.taxAmount, vals.taxRate, vals.taxName, vals.tenantId, vals.taxInclusive, vals.branchId, salePayHistJson, idemKey).run(),
           async () => env.DB.prepare(
             `INSERT INTO sales (id, date, customerName, saleType, items, totalAmount, paymentMethod, mpesaCode, cashier, paidAmount, balanceDue, deadline, subtotal, taxAmount, taxRate, taxName, tenantId, taxInclusive, branchId, paymentHistory)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -3079,13 +3242,12 @@ globalThis.__neoSchemaReady = true;
           await env.DB.prepare(`UPDATE sales SET tenantId = ? WHERE id = ? AND (tenantId IS NULL OR tenantId = '')`).bind(tenantId, body.id).run();
         } catch (_) {}
 
-        // Server-side loyalty points award & redemption (works regardless of customers.update role permission)
-        let updatedCustomerLoyaltyPoints = null;
-        try {
-          const ptsEarned = Math.max(0, parseFloat(body.loyaltyPointsEarned) || 0);
-          const ptsRedeemed = Math.max(0, parseFloat(body.loyaltyPointsRedeemed) || 0);
-          if ((ptsEarned > 0 || ptsRedeemed > 0) && (body.customerId || vals.customerName)) {
-            try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN loyaltyPoints REAL DEFAULT 0`).run(); } catch (_) {}
+        // Run loyalty update, payment audit log, and ledger journal concurrently
+        const ptsEarned = Math.max(0, parseFloat(body.loyaltyPointsEarned) || 0);
+        const ptsRedeemed = Math.max(0, parseFloat(body.loyaltyPointsRedeemed) || 0);
+        const updateLoyaltyTask = async () => {
+          if (!((ptsEarned > 0 || ptsRedeemed > 0) && (body.customerId || vals.customerName))) return null;
+          try {
             let custRow = null;
             if (body.customerId) {
               custRow = await env.DB.prepare(`SELECT id, loyaltyPoints FROM customers WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') LIMIT 1`).bind(body.customerId, tenantId).first();
@@ -3096,24 +3258,22 @@ globalThis.__neoSchemaReady = true;
             if (custRow && custRow.id) {
               const nextPts = Math.max(0, (parseFloat(custRow.loyaltyPoints) || 0) + ptsEarned - ptsRedeemed);
               await env.DB.prepare(`UPDATE customers SET loyaltyPoints = ? WHERE id = ?`).bind(nextPts, custRow.id).run();
-              updatedCustomerLoyaltyPoints = { customerId: custRow.id, loyaltyPoints: nextPts };
+              return { customerId: custRow.id, loyaltyPoints: nextPts };
             }
-          }
-        } catch (_) {}
-
-        if (vals.paidAmount > 0) {
-          try {
-            await appendTenantAuditRecord(tenantId, auth.user?.name || vals.cashier || 'Staff', 'payment', 'sales', `Sale ${vals.id} (${vals.customerName}) — Paid ${vals.paidAmount} via ${vals.paymentMethod}`);
           } catch (_) {}
-        }
+          return null;
+        };
 
-        // Journal (never fails the sale)
-        let journalId = null;
-        try {
-          journalId = await journalSale(auth, { ...body, items: saleItems }, branchId);
-        } catch (je) {
-          console.log('journalSale failed', je && je.message);
-        }
+        const [updatedCustomerLoyaltyPoints, , journalId] = await Promise.all([
+          updateLoyaltyTask(),
+          vals.paidAmount > 0
+            ? appendTenantAuditRecord(tenantId, auth.user?.name || vals.cashier || 'Staff', 'payment', 'sales', `Sale ${vals.id} (${vals.customerName}) — Paid ${vals.paidAmount} via ${vals.paymentMethod}`).catch(() => null)
+            : Promise.resolve(null),
+          journalSale(auth, { ...body, items: saleItems }, branchId).catch(je => {
+            console.log('journalSale failed', je && je.message);
+            return null;
+          })
+        ]);
 
         return json({ success: true, id: body.id, journalId: journalId || null, stockAdjusted: trackedLines.length, customerLoyalty: updatedCustomerLoyaltyPoints });
       }
@@ -3155,28 +3315,48 @@ globalThis.__neoSchemaReady = true;
             }
           }
         }
-        try {
-          const newPaid = Number(body.paidAmount) || 0;
-          const delta = Math.round((newPaid - prevPaid) * 100) / 100;
-          if (delta > 0.009) {
-            await journalCustomerReceipt(auth, { id, customerName: body.customerName }, delta, body.paymentMethod || 'Cash', body.branchId || '', id + '-rcpt-' + newPaid);
-            await appendTenantAuditRecord(tid, auth.user?.name || body.cashier || 'Staff', 'payment', 'sales', `Sale ${id} (${body.customerName || ''}) — Additional payment ${delta} via ${body.paymentMethod || 'Cash'}`);
-          }
-        } catch (_) {}
-        return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
+        const newPaid = Number(body.paidAmount) || 0;
+        const delta = Math.round((newPaid - prevPaid) * 100) / 100;
+        const acctUsed = Math.round(Math.max(0, Number(body.accountCreditUsed) || 0) * 100) / 100;
+        const acctExcess = Math.round(Math.max(0, Number(body.excessCredit) || 0) * 100) / 100;
+
+        const updateSaleCustomerCredit = async () => {
+          if (!((acctUsed > 0 || acctExcess > 0) && (body.customerId || body.customerName))) return null;
+          try {
+            let custRow = null;
+            if (body.customerId) {
+              custRow = await env.DB.prepare(`SELECT id, creditBalance FROM customers WHERE id = ? AND tenantId = ? LIMIT 1`).bind(body.customerId, tid).first();
+            }
+            if (!custRow && body.customerName) {
+              custRow = await env.DB.prepare(`SELECT id, creditBalance FROM customers WHERE LOWER(name) = LOWER(?) AND tenantId = ? LIMIT 1`).bind(body.customerName, tid).first();
+            }
+            if (custRow && custRow.id) {
+              const nextBal = Math.round(Math.max(0, (parseFloat(custRow.creditBalance) || 0) - acctUsed + acctExcess) * 100) / 100;
+              await env.DB.prepare(`UPDATE customers SET creditBalance = ? WHERE id = ?`).bind(nextBal, custRow.id).run();
+              return { customerId: custRow.id, creditBalance: nextBal };
+            }
+          } catch (_) {}
+          return null;
+        };
+
+        const rcptBranchId = (body.branchId && body.branchId !== 'all' ? body.branchId : '') || requestBranchId() || (await resolveBranchId(tid, null)) || '';
+        const payMethodUsed = body.lastPaymentMethod || body.paymentMethod || 'Cash';
+        const hasReceiptEvent = delta > 0.009 || acctExcess > 0.009;
+        const [updatedCustomerCredit] = await Promise.all([
+          updateSaleCustomerCredit(),
+          hasReceiptEvent ? journalCustomerReceipt(auth, { id, customerName: body.customerName }, Math.max(0, delta), payMethodUsed, rcptBranchId, id + '-rcpt-' + newPaid + '-' + acctExcess, acctExcess).catch(() => {}) : Promise.resolve(),
+          hasReceiptEvent ? appendTenantAuditRecord(tid, auth.user?.name || body.cashier || 'Staff', 'payment', 'sales', `Sale ${id} (${body.customerName || ''}) — Payment ${delta}${acctExcess > 0 ? ' + Excess Credit ' + acctExcess : ''} via ${payMethodUsed}`, { branchId: rcptBranchId }).catch(() => {}) : Promise.resolve()
+        ]);
+        return json({ success: true, customerCredit: updatedCustomerCredit });
       }
       if (request.method === 'DELETE' && id) {
         const tid = auth.tenantId || 'tenant-default';
         const delSale = await env.DB.prepare(`SELECT customerName, totalAmount FROM sales WHERE id = ? AND tenantId = ?`).bind(id, tid).first().catch(() => null);
-        try {
-          await env.DB.prepare(`DELETE FROM sales WHERE id = ? AND tenantId = ?`).bind(id, tid).run();
-        } catch (_) {
-          await env.DB.prepare(`DELETE FROM sales WHERE id = ?`).bind(id).run();
-        }
-        try {
-          await writeSecurityAudit(auth, 'delete', routeType, id);
-          await appendTenantAuditRecord(tid, auth.user?.name || 'Staff', 'delete', 'sales', `Deleted sale ${id}${delSale?.customerName ? ' (' + delSale.customerName + ')' : ''}`);
-        } catch (_) {}
+        await Promise.all([
+          env.DB.prepare(`DELETE FROM sales WHERE id = ? AND tenantId = ?`).bind(id, tid).run().catch(() => env.DB.prepare(`DELETE FROM sales WHERE id = ?`).bind(id).run()),
+          writeSecurityAudit(auth, 'delete', routeType, id).catch(() => {}),
+          appendTenantAuditRecord(tid, auth.user?.name || 'Staff', 'delete', 'sales', `Deleted sale ${id}${delSale?.customerName ? ' (' + delSale.customerName + ')' : ''}`).catch(() => {})
+        ]);
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
     }
@@ -3361,10 +3541,6 @@ globalThis.__neoSchemaReady = true;
 
     // 10. USERS CRUD (PIN hashed at rest)
     if (routeType === 'users') {
-      try { await env.DB.prepare(`ALTER TABLE users ADD COLUMN allowedBranches TEXT`).run(); } catch (_) {}
-
-      // Ensure optional profile photo column exists
-      try { await env.DB.prepare(`ALTER TABLE users ADD COLUMN photo TEXT`).run(); } catch (_) {}
       if (request.method === 'POST') {
         const body = await request.json();
         if (!auth.isAdmin && ['admin', 'superadmin'].includes(String(body.role || '').toLowerCase())) return deny('Only an administrator can assign an administrator role');
@@ -3492,15 +3668,6 @@ globalThis.__neoSchemaReady = true;
 
     // 13. PURCHASE ORDERS CRUD (Supports both 'purchase_orders' and 'purchase-orders')
     if (routeType === 'purchase_orders' || routeType === 'purchase-orders') {
-      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN returnedQty INTEGER DEFAULT 0').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN returnHistory TEXT').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN taxAmount REAL DEFAULT 0').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN taxRate REAL DEFAULT 0').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN createdBy TEXT').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN cogsBooked REAL DEFAULT 0').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN received INTEGER DEFAULT 0').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN taxInclusive INTEGER DEFAULT 0').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN paymentHistory TEXT').run(); } catch (_) {}
       if (request.method === 'POST') {
         const body = await request.json();
         const tidPo = auth.tenantId || 'tenant-default';
@@ -3903,8 +4070,6 @@ globalThis.__neoSchemaReady = true;
         const location = String(body.location || '').trim();
         const logo = body.logo !== undefined ? String(body.logo || '').trim() : '';
         const creditPolicy = body.creditPolicy === 'stop' ? 'stop' : (body.creditPolicy === 'warn' ? 'warn' : 'warn');
-        try { await env.DB.prepare(`ALTER TABLE shop_profile ADD COLUMN logo TEXT`).run(); } catch (_) {}
-        try { await env.DB.prepare(`ALTER TABLE shop_profile ADD COLUMN creditPolicy TEXT DEFAULT 'warn'`).run(); } catch (_) {}
         let saved = false;
         try {
           const existing = await env.DB.prepare(`SELECT id, logo, creditPolicy FROM shop_profile WHERE tenantId = ? OR id = ? LIMIT 1`).bind(tid, tid).first();
@@ -3957,15 +4122,6 @@ globalThis.__neoSchemaReady = true;
 
     // 16. EMPLOYEES CRUD
     if (routeType === 'employees') {
-      try {
-        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS employees (
-          id TEXT PRIMARY KEY, name TEXT, position TEXT, department TEXT, phone TEXT, email TEXT,
-          hireDate TEXT, salary REAL, status TEXT, nationalId TEXT, bankAccount TEXT, bankName TEXT, leaveBalance REAL, managerId TEXT, tenantId TEXT
-        )`).run();
-      } catch (_) {}
-      try { await env.DB.prepare(`ALTER TABLE employees ADD COLUMN bankName TEXT`).run(); } catch (_) {}
-      try { await env.DB.prepare(`ALTER TABLE employees ADD COLUMN managerId TEXT`).run(); } catch (_) {}
-      try { await env.DB.prepare(`ALTER TABLE employees ADD COLUMN userId TEXT`).run(); } catch (_) {}
       if (request.method === 'POST') {
         const body = await request.json();
         const tid = auth.tenantId || 'tenant-default';
@@ -4006,12 +4162,6 @@ globalThis.__neoSchemaReady = true;
 
     // 17. LEAVE REQUESTS CRUD
     if (routeType === 'leave-requests' || routeType === 'leave_requests') {
-      try {
-        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS leave_requests (
-          id TEXT PRIMARY KEY, employeeId TEXT, employeeName TEXT, leaveType TEXT, startDate TEXT, endDate TEXT,
-          days REAL, reason TEXT, status TEXT, approvedBy TEXT, createdAt TEXT, managerId TEXT, approverId TEXT, managerName TEXT, tenantId TEXT
-        )`).run();
-      } catch (_) {}
       if (request.method === 'POST') {
         const body = await request.json();
         const tid = auth.tenantId || 'tenant-default';
@@ -4029,8 +4179,6 @@ globalThis.__neoSchemaReady = true;
       if (request.method === 'PUT' && id) {
         const body = await request.json();
         const tid = auth.tenantId || 'tenant-default';
-        try { await env.DB.prepare('ALTER TABLE leave_requests ADD COLUMN decidedAt TEXT').run(); } catch (_) {}
-        try { await env.DB.prepare('ALTER TABLE leave_requests ADD COLUMN balanceDeducted INTEGER DEFAULT 0').run(); } catch (_) {}
         const existing = await env.DB.prepare('SELECT * FROM leave_requests WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = \'\')').bind(id, tid).first();
         const newStatus = body.status || 'Pending';
         const days = parseFloat(body.days) || (existing ? parseFloat(existing.days) : 0) || 0;
@@ -4077,10 +4225,6 @@ globalThis.__neoSchemaReady = true;
 
     // 18. PAYROLL CRUD
     if (routeType === 'payroll') {
-      try { await env.DB.prepare('ALTER TABLE payroll ADD COLUMN allowanceBreakdown TEXT').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE payroll ADD COLUMN deductionBreakdown TEXT').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE payroll ADD COLUMN allowanceOtherSpec TEXT').run(); } catch (_) {}
-      try { await env.DB.prepare('ALTER TABLE payroll ADD COLUMN deductionOtherSpec TEXT').run(); } catch (_) {}
       if (request.method === 'POST') {
         const body = await request.json();
         const tid = auth.tenantId || 'tenant-default';
@@ -4099,8 +4243,10 @@ globalThis.__neoSchemaReady = true;
       }
       if (request.method === 'DELETE' && id) {
         const tid = auth.tenantId || 'tenant-default';
-        await env.DB.prepare(`DELETE FROM payroll WHERE id = ? AND tenantId = ?`).bind(id, tid).run();
-        try { await writeSecurityAudit(auth, 'delete', routeType, id); } catch (_) {}
+        await Promise.all([
+          env.DB.prepare(`DELETE FROM payroll WHERE id = ? AND tenantId = ?`).bind(id, tid).run(),
+          writeSecurityAudit(auth, 'delete', routeType, id).catch(() => {})
+        ]);
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
     }
@@ -4112,12 +4258,6 @@ globalThis.__neoSchemaReady = true;
         const leaveTypes = typeof body.leaveTypes === 'string' ? body.leaveTypes : JSON.stringify(body.leaveTypes || []);
         const departments = typeof body.departments === 'string' ? body.departments : JSON.stringify(body.departments || []);
         const tid = auth.tenantId || 'tenant-default';
-        try {
-          await env.DB.prepare(`CREATE TABLE IF NOT EXISTS hr_settings_mt (
-            id TEXT PRIMARY KEY, tenantId TEXT UNIQUE, defaultAnnualLeave REAL DEFAULT 21,
-            leaveTypes TEXT, departments TEXT, payrollCycle TEXT, payDay INTEGER DEFAULT 28
-          )`).run();
-        } catch (_) {}
         await env.DB.prepare(
           `INSERT INTO hr_settings_mt (id, tenantId, defaultAnnualLeave, leaveTypes, departments, payrollCycle, payDay)
            VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -4139,21 +4279,9 @@ globalThis.__neoSchemaReady = true;
 
     // 20. TAX SETTINGS (per-tenant persistent table)
     if (routeType === 'tax-settings') {
-      try { await env.DB.prepare(`ALTER TABLE tax_settings_mt ADD COLUMN expenseTaxEnabled INTEGER DEFAULT 0`).run(); } catch (_) {}
-      try { await env.DB.prepare(`ALTER TABLE tax_settings_mt ADD COLUMN expenseTaxRate REAL DEFAULT 0`).run(); } catch (_) {}
-      try { await env.DB.prepare(`ALTER TABLE tax_settings_mt ADD COLUMN expenseTaxName TEXT`).run(); } catch (_) {}
-
       if (request.method === 'PUT' || request.method === 'POST') {
         const body = await request.json();
         const tid = auth.tenantId || 'tenant-default';
-        try {
-          await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tax_settings_mt (
-            id TEXT PRIMARY KEY, tenantId TEXT UNIQUE,
-            salesTaxEnabled INTEGER DEFAULT 0, salesTaxRate REAL DEFAULT 0, salesTaxName TEXT,
-            purchaseTaxEnabled INTEGER DEFAULT 0, purchaseTaxRate REAL DEFAULT 0, purchaseTaxName TEXT,
-            taxInclusive INTEGER DEFAULT 0
-          )`).run();
-        } catch (_) {}
         await env.DB.prepare(
           `INSERT INTO tax_settings_mt (id, tenantId, salesTaxEnabled, salesTaxRate, salesTaxName, purchaseTaxEnabled, purchaseTaxRate, purchaseTaxName, taxInclusive)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -5349,15 +5477,9 @@ globalThis.__neoSchemaReady = true;
     }
 
 
-// STOCK MOVEMENTS (server-side permanent history)
+// STOCK MOVEMENTS (server-side permanent history; supports single or batched movements)
     if (routeType === 'stock-movements' || routeType === 'stock_movements') {
       const tid = auth.tenantId || 'tenant-default';
-      try {
-        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS stock_movements (
-          id TEXT PRIMARY KEY, tenantId TEXT, branchId TEXT, itemId TEXT, itemName TEXT,
-          qtyChange REAL, reason TEXT, ref TEXT, userName TEXT, at TEXT
-        )`).run();
-      } catch (_) {}
       if (request.method === 'GET') {
         const rows = (await env.DB.prepare(
           `SELECT * FROM stock_movements WHERE tenantId = ? ORDER BY at DESC LIMIT 500`
@@ -5366,16 +5488,30 @@ globalThis.__neoSchemaReady = true;
       }
       if (request.method === 'POST') {
         const body = await request.json();
-        const id = body.id || ('sm-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7));
-        await env.DB.prepare(
-          `INSERT INTO stock_movements (id, tenantId, branchId, itemId, itemName, qtyChange, reason, ref, userName, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).bind(
-          id, tid, body.branchId || '', body.itemId || '', body.itemName || '',
+        const insSql = `INSERT INTO stock_movements (id, tenantId, branchId, itemId, itemName, qtyChange, reason, ref, userName, at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+        if (Array.isArray(body.movements)) {
+          const list = body.movements.filter(Boolean);
+          if (list.length === 0) return json({ success: true, count: 0 });
+          const nowIso = new Date().toISOString();
+          const stmts = list.map((m, idx) => {
+            const mid = m.id || ('sm-' + Date.now() + '-' + idx + '-' + Math.random().toString(36).slice(2, 6));
+            return env.DB.prepare(insSql).bind(
+              mid, tid, m.branchId || '', m.itemId || '', m.itemName || '',
+              Number(m.qtyChange) || 0, m.reason || '', m.ref || '',
+              m.userName || m.user || auth.user?.name || '', m.at || nowIso
+            );
+          });
+          await env.DB.batch(stmts);
+          return json({ success: true, count: list.length });
+        }
+        const mid = body.id || ('sm-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7));
+        await env.DB.prepare(insSql).bind(
+          mid, tid, body.branchId || '', body.itemId || '', body.itemName || '',
           Number(body.qtyChange) || 0, body.reason || '', body.ref || '',
           body.userName || body.user || auth.user?.name || '', body.at || new Date().toISOString()
         ).run();
-        return json({ success: true, id });
+        return json({ success: true, id: mid });
       }
       if (request.method === 'DELETE') {
         const body = request.headers.get('Content-Type') ? await request.json().catch(() => ({})) : {};

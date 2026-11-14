@@ -1214,8 +1214,7 @@ export default function App() {
           const nextMv = (stockMovements || []).filter(m => m.itemId !== itemId && m.ref !== itemId);
           if (typeof saveStockMovements === 'function') saveStockMovements(nextMv);
           else setStockMovements(nextMv);
-          apiFetch('/api/stock-movements', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ itemId }) }).catch(() => {});
-          logAudit('delete', 'inventory', itemId);
+          logAudit('delete', 'inventory', itemId, '', { localOnly: true });
           setSelectedInventoryItem(null);
         } else {
           alert('Failed to delete inventory item.');
@@ -1305,6 +1304,7 @@ export default function App() {
         }];
       }
       const deltaPaid = Math.round(((parseFloat(normalized.paidAmount) || 0) - prevPaid) * 100) / 100;
+      const exists = (expenses || []).some(e => e.id === normalized.id);
       if (deltaPaid > 0) {
         hist = [
           ...hist,
@@ -1316,22 +1316,29 @@ export default function App() {
             mpesaCode: String(normalized.paymentMethod || '').toLowerCase().includes('m-pesa') ? (normalized.mpesaCode || '') : ''
           }
         ];
-        logAudit('payment', 'expense', `${normalized.id} · ${shopProfile.currency} ${deltaPaid} via ${normalized.paymentMethod || 'Cash'} (${normalized.description || normalized.category || ''})`);
+        logAudit('payment', 'expense', `${normalized.id} · ${shopProfile.currency} ${deltaPaid} via ${normalized.paymentMethod || 'Cash'} (${normalized.description || normalized.category || ''})`, '', { localOnly: true });
       }
       normalized.paymentHistory = hist;
-      const exists = (expenses || []).some(e => e.id === normalized.id);
       const nextList = exists
         ? expenses.map(e => e.id === normalized.id ? normalized : e)
         : [normalized, ...(expenses || [])];
       persistExpenses(nextList);
       setSelectedExpenseItem(null);
       try {
-        const res = await apiFetch(`/api/expenses/${normalized.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(normalized)
-        });
-        if (!res.ok) {
+        if (exists) {
+          const res = await apiFetch(`/api/expenses/${normalized.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(normalized)
+          });
+          if (!res.ok) {
+            await apiFetch('/api/expenses', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(normalized)
+            });
+          }
+        } else {
           await apiFetch('/api/expenses', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1339,15 +1346,7 @@ export default function App() {
           });
         }
       } catch (err) {
-        try {
-          await apiFetch('/api/expenses', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(normalized)
-          });
-        } catch (err2) {
-          console.warn('Expense saved locally', err2);
-        }
+        console.warn('Expense saved locally', err);
       }
     });
   };
@@ -1358,7 +1357,7 @@ export default function App() {
       const target = (expenses || []).find(e => e.id === expenseId);
       persistExpenses(expenses.filter(e => e.id !== expenseId));
       setSelectedExpenseItem(null);
-      logAudit('delete', 'expense', `${expenseId}${target?.description ? ' (' + target.description + ')' : ''}`);
+      logAudit('delete', 'expense', `${expenseId}${target?.description ? ' (' + target.description + ')' : ''}`, '', { localOnly: true });
       try {
         await apiFetch(`/api/expenses/${expenseId}`, { method: 'DELETE' });
       } catch (err) {
@@ -1375,7 +1374,7 @@ export default function App() {
         if (response.ok) {
           setSales(sales.filter(s => s.id !== saleId));
           setSelectedSaleItem(null);
-          logAudit('delete', 'sale', saleId);
+          logAudit('delete', 'sale', saleId, '', { localOnly: true });
         } else {
           alert('Failed to delete transaction record.');
         }
@@ -3322,15 +3321,35 @@ export default function App() {
       const nextSales = [finalRecord, ...(sales || []).filter(s => s.id !== finalRecord.id)];
       setSales(nextSales);
       if (initialSalePaid > 0 && !deduplicated) {
-        logAudit('payment', 'sales', `${finalRecord.id} · ${shopProfile.currency} ${initialSalePaid} via ${paymentMethodStr} (${posSelectedCustomer})${excessCreditAmt > 0 ? ` · Excess +${shopProfile.currency} ${excessCreditAmt} credited to account` : ''}`);
+        logAudit('payment', 'sales', `${finalRecord.id} · ${shopProfile.currency} ${initialSalePaid} via ${paymentMethodStr} (${posSelectedCustomer})${excessCreditAmt > 0 ? ` · Excess +${shopProfile.currency} ${excessCreditAmt} credited to account` : ''}`, '', { localOnly: !serverSale ? false : true });
       }
       if (!deduplicated) {
         try {
-          posCart.forEach(ci => {
-            if (isTrackedInventory(ci)) {
-              logStock(ci.id, formatItemDisplayName(ci), -(Number(ci.cartQty) || 0), 'Sale', finalRecord.id, activeBranchId && activeBranchId !== 'all' ? activeBranchId : '');
-            }
-          });
+          const mvBranch = activeBranchId && activeBranchId !== 'all' ? activeBranchId : '';
+          const nowAt = new Date().toISOString();
+          const movements = posCart
+            .filter(ci => isTrackedInventory(ci))
+            .map((ci, idx) => ({
+              id: `sm-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+              at: nowAt,
+              itemId: ci.id || '',
+              itemName: formatItemDisplayName(ci) || '',
+              qtyChange: -(Number(ci.cartQty) || 0),
+              reason: 'Sale',
+              ref: finalRecord.id || '',
+              user: currentUser?.name || '',
+              userName: currentUser?.name || '',
+              tenantId: (tenantInfo && tenantInfo.id) || '',
+              branchId: mvBranch
+            }));
+          if (movements.length > 0) {
+            setStockMovements(prev => [...movements, ...(Array.isArray(prev) ? prev : [])].slice(0, 500));
+            apiFetch('/api/stock-movements', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ movements })
+            }).catch(() => {});
+          }
         } catch (_) {}
       }
       setLastCompletedSale({ ...finalRecord, items: posCart });
@@ -4441,6 +4460,9 @@ export default function App() {
         setLoginPrivileges(privFromLogin);
         try { localStorage.setItem('erp_login_privileges', JSON.stringify(privFromLogin)); } catch (e) {}
         setCurrentUser(foundUser);
+        if (Array.isArray(data.branches) && data.branches.length) {
+          setBranches(data.branches);
+        }
       // Auto-assign branch for single-location users on login
       try {
         const isAdm = (foundUser.role || '').toLowerCase() === 'admin' || !!data.isSuperAdmin;
@@ -4936,15 +4958,18 @@ export default function App() {
     }
     return allowedBranchIds.includes(String(bid));
   };
-  const logAudit = (action, entity, detail) => {
-    const auditBranchId = strictActiveBranchId || activeBranchId || (currentBranchId && currentBranchId !== 'all' ? currentBranchId : '') || '';
+  const logAudit = (action, entity, detail, branchIdOverride = '', opts = null) => {
+    const auditBranchId = branchIdOverride || strictActiveBranchId || activeBranchId || (currentBranchId && currentBranchId !== 'all' ? currentBranchId : '') || '';
     const entry = { id: `aud-${Date.now()}-${Math.random().toString(36).slice(2,7)}`, at: new Date().toISOString(), user: currentUser?.name || 'System', action, entity, detail: String(detail || ''), branchId: auditBranchId, tenantId: (tenantInfo && tenantInfo.id) || '' };
     setAuditLog(prev => [entry, ...(Array.isArray(prev) ? prev : [])].slice(0, 600));
-    apiFetch('/api/audit-append', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, entity, detail: String(detail || ''), branchId: auditBranchId })
-    }).catch(() => {});
+    const localOnly = opts === true || !!(opts && opts.localOnly);
+    if (!localOnly) {
+      apiFetch('/api/audit-append', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, entity, detail: String(detail || ''), branchId: auditBranchId })
+      }).catch(() => {});
+    }
   };
   const logStock = (itemId, itemName, qtyChange, reason, refId, branchId) => {
     const bid = branchId || activeBranchId || currentBranchId || '';
@@ -8289,16 +8314,13 @@ export default function App() {
                                     if (!window.confirm('Are you sure you want to delete this draft purchase order?')) return;
                                     const res = await apiFetch(`/api/purchase_orders/${po.id}`, { method: 'DELETE' });
                                     if (res.ok) {
-                                      logAudit('delete', 'purchase_orders', `${po.id} (${po.supplierName || ''})`);
+                                      logAudit('delete', 'purchase_orders', `${po.id} (${po.supplierName || ''})`, '', { localOnly: true });
                                       const gid = po.groupId;
                                       const removedIds = new Set([po.id, ...((purchaseOrders || []).filter(p => gid && p.groupId === gid).map(p => p.id))]);
                                       setPurchaseOrders(purchaseOrders.filter(p => p.id !== po.id && (!gid || p.groupId !== gid)));
                                       const nextMv = (stockMovements || []).filter(m => !removedIds.has(m.ref) && m.ref !== po.id);
                                       if (typeof saveStockMovements === 'function') saveStockMovements(nextMv);
                                       else setStockMovements(nextMv);
-                                      removedIds.forEach(rid => {
-                                        apiFetch('/api/stock-movements', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ref: rid }) }).catch(() => {});
-                                      });
                                       if (selectedPO && (selectedPO.id === po.id || (gid && selectedPO.groupId === gid))) setSelectedPO(null);
                                     } else {
                                       alert('Failed to delete purchase order.');
@@ -8937,7 +8959,7 @@ export default function App() {
                         <button type="button" disabled={isBusy('po_del')} onClick={() => runWithLock('po_del', async () => {
                           if (!window.confirm(`Delete purchase order ${selectedPO.id}? This cannot be undone.`)) return;
                           try { await apiFetch(`/api/purchase_orders/${selectedPO.id}`, { method: 'DELETE' }); } catch (e) {}
-                          logAudit('delete', 'purchase_orders', `${selectedPO.id} (${selectedPO.supplierName || ''})`);
+                          logAudit('delete', 'purchase_orders', `${selectedPO.id} (${selectedPO.supplierName || ''})`, '', { localOnly: true });
                           setPurchaseOrders(prev => prev.filter(p => p.id !== selectedPO.id));
                           setSelectedPO(null);
                         })} className="py-2 px-4 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('po_del') ? 'Deleting…' : 'Delete'}</button>
@@ -8993,7 +9015,7 @@ export default function App() {
                       };
                       const ok = await upsertPO(updated);
                       if (ok) {
-                        logAudit('payment', 'purchase_orders', `${selectedPO.id} · ${shopProfile.currency} ${payAmt} via ${poPaymentForm.paymentMethod}`);
+                        logAudit('payment', 'purchase_orders', `${selectedPO.id} · ${shopProfile.currency} ${payAmt} via ${poPaymentForm.paymentMethod}`, '', { localOnly: true });
                         setPaymentMethods(prev => prev.map(pm => (pm.name || '').toLowerCase() === poPaymentForm.paymentMethod.toLowerCase() ? { ...pm, startingBalance: Math.max(0, (Number(pm.startingBalance) || 0) - payAmt) } : pm));
                       }
                       setPoPaymentModalOpen(false);
@@ -9093,13 +9115,13 @@ export default function App() {
                       }
                       persistExpenses([exp, ...expenses]);
                       if (paidFinal > 0) {
-                        logAudit('payment', 'expense', `${exp.id} · ${shopProfile.currency} ${paidFinal} via ${newExpense.paymentMethod || 'Cash'} (${newExpense.description || ''})`);
+                        logAudit('payment', 'expense', `${exp.id} · ${shopProfile.currency} ${paidFinal} via ${newExpense.paymentMethod || 'Cash'} (${newExpense.description || ''})`, '', { localOnly: true });
                       }
                       setNewExpense({ date: new Date().toISOString().split('T')[0], category: expenseCategories[0]?.name || 'Store Rent', description: '', amount: '', paidAmount: '', paymentMethod: 'Cash', mpesaCode: '', payer: '', paidTo: '' });
                     } catch (err) {
                       persistExpenses([exp, ...expenses]);
                       if (paidFinal > 0) {
-                        logAudit('payment', 'expense', `${exp.id} · ${shopProfile.currency} ${paidFinal} via ${newExpense.paymentMethod || 'Cash'} (${newExpense.description || ''})`);
+                        logAudit('payment', 'expense', `${exp.id} · ${shopProfile.currency} ${paidFinal} via ${newExpense.paymentMethod || 'Cash'} (${newExpense.description || ''})`, '', { localOnly: true });
                       }
                       saveOfflineQueue([...(offlineQueue || []), { id: `oq-exp-${Date.now()}`, type: 'expense', payload: exp, at: new Date().toISOString(), status: 'pending', lastError: (err && err.message) || 'Offline / queued for sync' }]);
                       setNewExpense({ date: new Date().toISOString().split('T')[0], category: expenseCategories[0]?.name || 'Store Rent', description: '', amount: '', paidAmount: '', paymentMethod: 'Cash', mpesaCode: '', payer: '', paidTo: '' });
@@ -13594,7 +13616,7 @@ export default function App() {
                               : Math.max(0, Math.round((payCustCredit - acctCreditUsed + excessToAccount) * 100) / 100);
                             setCustomers(prev => prev.map(c => c.id === payCust.id ? { ...c, creditBalance: nextCred } : c));
                           }
-                          logAudit('payment', 'sales', `${updatedSale.id} · ${shopProfile.currency} ${appliedToDebt} via ${method}${excessToAccount > 0 ? ` (+${shopProfile.currency} ${excessToAccount} account credit)` : ''}`);
+                          logAudit('payment', 'sales', `${updatedSale.id} · ${shopProfile.currency} ${appliedToDebt} via ${method}${excessToAccount > 0 ? ` (+${shopProfile.currency} ${excessToAccount} account credit)` : ''}`, '', { localOnly: true });
                         }
                       } catch (err) {
                         console.error(err);
@@ -14594,11 +14616,30 @@ export default function App() {
                       return;
                     }
                     await refreshAllDataFromServer();
-                    receiveLines.forEach(ln => {
-                      logStock(ln.itemId, ln.itemName, ln.qty, 'PO Receive', poReceivePO.id, targetBranchId);
-                    });
+                    const poNowAt = new Date().toISOString();
+                    const poMovements = receiveLines.map((ln, idx) => ({
+                      id: `sm-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+                      at: poNowAt,
+                      itemId: ln.itemId || '',
+                      itemName: ln.itemName || '',
+                      qtyChange: Number(ln.qty) || 0,
+                      reason: 'PO Receive',
+                      ref: poReceivePO.id || '',
+                      user: currentUser?.name || '',
+                      userName: currentUser?.name || '',
+                      tenantId: (tenantInfo && tenantInfo.id) || '',
+                      branchId: targetBranchId && targetBranchId !== 'all' ? targetBranchId : ''
+                    }));
+                    if (poMovements.length > 0) {
+                      setStockMovements(prev => [...poMovements, ...(Array.isArray(prev) ? prev : [])].slice(0, 500));
+                      apiFetch('/api/stock-movements', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ movements: poMovements })
+                      }).catch(() => {});
+                    }
                     const totalRecNow = receiveLines.reduce((s, x) => s + x.qty, 0);
-                    logAudit('po_receive', 'Purchase Order', `PO ${poReceivePO.id} received ${totalRecNow} unit(s) (${d.workflowStatus || ''})`, targetBranchId);
+                    logAudit('po_receive', 'Purchase Order', `PO ${poReceivePO.id} received ${totalRecNow} unit(s) (${d.workflowStatus || ''})`, targetBranchId, { localOnly: true });
                     setPoReceiveModalOpen(false);
                     setPoReceivePO(null);
                   } catch (e) {
@@ -14741,7 +14782,7 @@ export default function App() {
                       return;
                     }
                     await refreshAllDataFromServer();
-                    logAudit('inventory_assign_legacy', 'Inventory', `${legacyAssignMode}: ${itemIds.length} item(s)`, legacyAssignBranchId || strictActiveBranchId || '');
+                    logAudit('inventory_assign_legacy', 'Inventory', `${legacyAssignMode}: ${itemIds.length} item(s)`, legacyAssignBranchId || strictActiveBranchId || '', { localOnly: true });
                     setLegacyAssignModalOpen(false);
                     alert(`Updated ${d.updatedCount ?? itemIds.length} legacy item(s)${d.createdCount ? `, created ${d.createdCount} branch row(s)` : ''}.`);
                   } catch (e) {

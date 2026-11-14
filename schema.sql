@@ -285,3 +285,24 @@ CREATE TABLE IF NOT EXISTS tax_settings (
   taxInclusive INTEGER,
   tenantId TEXT
 );
+
+-- Performance indexes for fast logins, tenant isolation, and CRUD lookups
+CREATE INDEX IF NOT EXISTS idx_users_lower_name ON users(LOWER(name));
+CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenantId);
+CREATE INDEX IF NOT EXISTS idx_roles_tenant ON roles(tenantId);
+CREATE INDEX IF NOT EXISTS idx_inventory_tenant ON inventory(tenantId);
+CREATE INDEX IF NOT EXISTS idx_inventory_tenant_branch ON inventory(tenantId, branchId);
+CREATE INDEX IF NOT EXISTS idx_customers_tenant ON customers(tenantId);
+CREATE INDEX IF NOT EXISTS idx_sales_tenant ON sales(tenantId);
+CREATE INDEX IF NOT EXISTS idx_sales_idem ON sales(tenantId, idempotencyKey);
+CREATE INDEX IF NOT EXISTS idx_expenses_tenant ON expenses(tenantId);
+CREATE INDEX IF NOT EXISTS idx_suppliers_tenant ON suppliers(tenantId);
+CREATE INDEX IF NOT EXISTS idx_po_tenant ON purchase_orders(tenantId);
+CREATE INDEX IF NOT EXISTS idx_po_group ON purchase_orders(tenantId, groupId);
+CREATE INDEX IF NOT EXISTS idx_emp_tenant ON employees(tenantId);
+CREATE INDEX IF NOT EXISTS idx_leave_tenant ON leave_requests(tenantId);
+CREATE INDEX IF NOT EXISTS idx_payroll_tenant ON payroll(tenantId);
+CREATE INDEX IF NOT EXISTS idx_categories_tenant ON categories(tenantId);
+CREATE INDEX IF NOT EXISTS idx_expcat_tenant ON expense_categories(tenantId);
+CREATE INDEX IF NOT EXISTS idx_itemstat_tenant ON item_statuses(tenantId);
+

@@ -13,6 +13,20 @@ const __dirname = path.dirname(__filename);
 
 const sqlite = new Database(path.join(__dirname, 'neo-erp.db'));
 sqlite.pragma('journal_mode = WAL');
+sqlite.pragma('synchronous = NORMAL');
+sqlite.pragma('temp_store = MEMORY');
+sqlite.pragma('cache_size = -32000');
+sqlite.pragma('mmap_size = 268435456');
+
+const stmtCache = new Map<string, Database.Statement>();
+function getPreparedStmt(sql: string): Database.Statement {
+  let stmt = stmtCache.get(sql);
+  if (!stmt) {
+    stmt = sqlite.prepare(sql);
+    if (stmtCache.size < 400) stmtCache.set(sql, stmt);
+  }
+  return stmt;
+}
 
 // Initialize schema
 const schemaPath = path.join(__dirname, 'schema.sql');
@@ -88,7 +102,7 @@ class D1PreparedStatement {
   }
 
   async all() {
-    const stmt = sqlite.prepare(this.sql);
+    const stmt = getPreparedStmt(this.sql);
     if (stmt.reader) {
       const results = stmt.all(...this.params);
       return { results: results || [], success: true, meta: { changes: 0 } };
@@ -103,7 +117,7 @@ class D1PreparedStatement {
   }
 
   async first(colName?: string) {
-    const stmt = sqlite.prepare(this.sql);
+    const stmt = getPreparedStmt(this.sql);
     if (stmt.reader) {
       const row = stmt.get(...this.params) as Record<string, any> | undefined;
       if (!row) return null;
@@ -116,7 +130,7 @@ class D1PreparedStatement {
   }
 
   async run() {
-    const stmt = sqlite.prepare(this.sql);
+    const stmt = getPreparedStmt(this.sql);
     if (stmt.reader) {
       const results = stmt.all(...this.params);
       return { results, success: true, meta: { changes: 0 } };
@@ -140,7 +154,7 @@ const d1Adapter = {
     const tx = sqlite.transaction((stmts: D1PreparedStatement[]) => {
       for (const s of stmts) {
         // Execute synchronously inside transaction
-        const stmt = sqlite.prepare((s as any).sql);
+        const stmt = getPreparedStmt((s as any).sql);
         const params = (s as any).params || [];
         if (stmt.reader) {
           const rows = stmt.all(...params);
