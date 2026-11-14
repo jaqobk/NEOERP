@@ -218,10 +218,10 @@ export async function onRequest(context) {
         try { await env.DB.prepare(`ALTER TABLE ${t} ADD COLUMN tenantId TEXT`).run(); } catch (_) {}
       }
       // Forward-compatible purchase workflow columns used by receipt/payment/return tracking.
-      for (const col of ['taxInclusive INTEGER DEFAULT 0', 'paymentHistory TEXT', 'received INTEGER DEFAULT 0', 'returnedQty INTEGER DEFAULT 0', 'returnHistory TEXT', 'taxAmount REAL DEFAULT 0', 'taxRate REAL DEFAULT 0', 'createdBy TEXT', 'cogsBooked REAL DEFAULT 0', 'items TEXT', 'groupId TEXT']) {
+      for (const col of ['taxInclusive INTEGER DEFAULT 0', 'paymentHistory TEXT', 'received INTEGER DEFAULT 0', 'receivedQty INTEGER DEFAULT 0', 'receiveHistory TEXT', 'returnedQty INTEGER DEFAULT 0', 'returnHistory TEXT', 'taxAmount REAL DEFAULT 0', 'taxRate REAL DEFAULT 0', 'createdBy TEXT', 'cogsBooked REAL DEFAULT 0', 'items TEXT', 'groupId TEXT']) {
         try { await env.DB.prepare(`ALTER TABLE purchase_orders ADD COLUMN ${col}`).run(); } catch (_) {}
       }
-      for (const col of ['returnHistory TEXT', 'taxInclusive INTEGER DEFAULT 0', 'originalSaleType TEXT', 'paymentHistory TEXT']) {
+      for (const col of ['returnHistory TEXT', 'taxInclusive INTEGER DEFAULT 0', 'originalSaleType TEXT', 'paymentHistory TEXT', 'idempotencyKey TEXT']) {
         try { await env.DB.prepare(`ALTER TABLE sales ADD COLUMN ${col}`).run(); } catch (_) {}
       }
       try { await env.DB.prepare(`ALTER TABLE expenses ADD COLUMN paymentHistory TEXT`).run(); } catch (_) {}
@@ -484,9 +484,33 @@ globalThis.__neoSchemaReady = true;
       const def = branches.find(b => b.isDefault) || branches[0];
       return def ? def.id : null;
     };
+    const getEffectiveAllowedBranches = (authUser) => {
+      if (!authUser || authUser.isAdmin || authUser.isSuperAdmin) return null;
+      const parseBranchList = (raw) => {
+        if (Array.isArray(raw)) return raw.map(String).filter(Boolean);
+        if (typeof raw === 'string' && raw.trim()) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean);
+          } catch (_) {
+            return raw.split(',').map(s => s.trim()).filter(Boolean);
+          }
+        }
+        return [];
+      };
+      const userList = parseBranchList(authUser.user && authUser.user.allowedBranches);
+      const privList = parseBranchList(authUser.privileges && authUser.privileges.allowedBranches);
+      if (userList.length && privList.length) {
+        const inter = userList.filter(b => privList.includes(b));
+        return inter.length ? inter : userList;
+      }
+      if (userList.length) return userList;
+      if (privList.length) return privList;
+      return null;
+    };
     const branchAllowedForAuth = (authUser, branchId) => {
       if (!authUser || authUser.isAdmin || authUser.isSuperAdmin) return true;
-      const list = authUser.privileges && authUser.privileges.allowedBranches;
+      const list = getEffectiveAllowedBranches(authUser);
       if (!Array.isArray(list) || !list.length) return true;
       return list.map(String).includes(String(branchId));
     };
@@ -658,6 +682,7 @@ globalThis.__neoSchemaReady = true;
       { code: '1200', name: 'Inventory', type: 'asset' },
       { code: '2000', name: 'Accounts Payable', type: 'liability' },
       { code: '2100', name: 'Tax Payable', type: 'liability' },
+      { code: '2200', name: 'Customer Credit Balances', type: 'liability' },
       { code: '4000', name: 'Sales Revenue', type: 'revenue' },
       { code: '4100', name: 'Sales Returns', type: 'revenue' },
       { code: '5000', name: 'Cost of Goods Sold', type: 'expense' },
@@ -880,7 +905,7 @@ globalThis.__neoSchemaReady = true;
     const computeSaleCogs = (items) => {
       let cogs = 0;
       for (const it of (items || [])) {
-        const qty = Number(it.qty) || 0;
+        const qty = Math.max(0, (Number(it.qty ?? it.quantity) || 0) - (Number(it.returnedSaleableQty) || 0));
         const cost = Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0;
         cogs += qty * cost;
       }
@@ -890,15 +915,20 @@ globalThis.__neoSchemaReady = true;
     const parsePaymentSplit = (body) => {
       let cash = body.cashPaid != null ? Number(body.cashPaid) : NaN;
       let mpesa = body.mpesaPaid != null ? Number(body.mpesaPaid) : NaN;
-      if (!isNaN(cash) || !isNaN(mpesa)) {
-        return { cash: Math.max(0, cash || 0), mpesa: Math.max(0, mpesa || 0) };
+      let bank = body.bankPaid != null ? Number(body.bankPaid) : NaN;
+      if (!isNaN(cash) || !isNaN(mpesa) || !isNaN(bank)) {
+        return { cash: Math.max(0, (cash || 0) + (bank || 0)), mpesa: Math.max(0, mpesa || 0) };
       }
       const method = String(body.paymentMethod || '');
-      // Pattern: Cash (123) + M-Pesa (456)
+      // Pattern: Cash (123) + M-Pesa (456) + Bank Transfer (789)
       const cashM = method.match(/Cash\s*\((\d+(?:\.\d+)?)\)/i);
       const mpesaM = method.match(/M-?Pesa\s*\((\d+(?:\.\d+)?)\)/i);
-      if (cashM || mpesaM) {
-        return { cash: cashM ? parseFloat(cashM[1]) : 0, mpesa: mpesaM ? parseFloat(mpesaM[1]) : 0 };
+      const bankM = method.match(/Bank(?:\s*Transfer)?\s*\((\d+(?:\.\d+)?)\)/i);
+      if (cashM || mpesaM || bankM) {
+        return {
+          cash: (cashM ? parseFloat(cashM[1]) : 0) + (bankM ? parseFloat(bankM[1]) : 0),
+          mpesa: mpesaM ? parseFloat(mpesaM[1]) : 0
+        };
       }
       const paid = Number(body.paidAmount) || 0;
       if (/m-?pesa/i.test(method) && /cash/i.test(method)) {
@@ -925,21 +955,26 @@ globalThis.__neoSchemaReady = true;
       const items = typeof body.items === 'string' ? (() => { try { return JSON.parse(body.items); } catch { return []; } })() : (body.items || []);
       const cogs = computeSaleCogs(items);
       const lines = [];
+      const acctCreditUsed = Math.round(Math.max(0, Number(body.accountCreditUsed) || 0) * 100) / 100;
+      const excessCredit = Math.round(Math.max(0, Number(body.excessCredit) || 0) * 100) / 100;
       const split = parsePaymentSplit(body);
       let cashAmt = Math.round((split.cash || 0) * 100) / 100;
       let mpesaAmt = Math.round((split.mpesa || 0) * 100) / 100;
-      if (paid > 0 && cashAmt + mpesaAmt <= 0.001) {
-        cashAmt = paid;
+      const netSaleCashTarget = Math.max(0, paid - acctCreditUsed);
+      if (netSaleCashTarget > 0 && cashAmt + mpesaAmt <= 0.001) {
+        cashAmt = netSaleCashTarget;
         mpesaAmt = 0;
       }
-      // Scale split to exact paid
-      if (paid > 0 && cashAmt + mpesaAmt > 0 && Math.abs(cashAmt + mpesaAmt - paid) > 0.01) {
-        const scale = paid / (cashAmt + mpesaAmt);
+      // Scale split to net cash+mpesa applied to sale
+      if (netSaleCashTarget > 0 && cashAmt + mpesaAmt > 0 && Math.abs(cashAmt + mpesaAmt - netSaleCashTarget) > 0.01 && excessCredit <= 0) {
+        const scale = netSaleCashTarget / (cashAmt + mpesaAmt);
         cashAmt = Math.round(cashAmt * scale * 100) / 100;
-        mpesaAmt = Math.round((paid - cashAmt) * 100) / 100;
+        mpesaAmt = Math.round((netSaleCashTarget - cashAmt) * 100) / 100;
       }
       if (cashAmt > 0) lines.push({ accountCode: '1000', debit: cashAmt, credit: 0, memo: 'Sale cash' });
       if (mpesaAmt > 0) lines.push({ accountCode: '1010', debit: mpesaAmt, credit: 0, memo: 'Sale M-Pesa' });
+      if (acctCreditUsed > 0) lines.push({ accountCode: '2200', debit: acctCreditUsed, credit: 0, memo: 'Applied customer account credit' });
+      if (excessCredit > 0) lines.push({ accountCode: '2200', debit: 0, credit: excessCredit, memo: 'Excess credited to customer account' });
       if (balance > 0) lines.push({ accountCode: '1100', debit: balance, credit: 0, memo: 'AR ' + (body.customerName || '') });
       // Net revenue must NOT double-count tax when subtotal is tax-inclusive
       let netRevenue;
@@ -979,14 +1014,23 @@ globalThis.__neoSchemaReady = true;
       });
     };
 
-    /** Customer receipt: pay-down of credit/layby AR */
-    const journalCustomerReceipt = async (auth, sale, payAmount, method, branchId, receiptKey) => {
-      const amt = Number(payAmount) || 0;
-      if (amt <= 0) return null;
-      const lines = [
-        { accountCode: cashAccountForMethod(method), debit: amt, credit: 0, memo: 'Customer receipt' },
-        { accountCode: '1100', debit: 0, credit: amt, memo: 'AR pay-down ' + (sale.customerName || sale.id || '') }
-      ];
+    /** Customer receipt: pay-down of credit/layby AR (plus optional excess to customer credit balance) */
+    const journalCustomerReceipt = async (auth, sale, payAmount, method, branchId, receiptKey, excessCredit = 0) => {
+      const amt = Math.round((Number(payAmount) || 0) * 100) / 100;
+      const excess = Math.round(Math.max(0, Number(excessCredit) || 0) * 100) / 100;
+      if (amt <= 0 && excess <= 0) return null;
+      const isAcctCredit = String(method || '').toLowerCase().includes('account credit');
+      const lines = [];
+      if (amt > 0) {
+        lines.push({ accountCode: isAcctCredit ? '2200' : cashAccountForMethod(method), debit: amt + (isAcctCredit ? 0 : excess), credit: 0, memo: isAcctCredit ? 'Applied customer account credit' : 'Customer receipt' });
+        lines.push({ accountCode: '1100', debit: 0, credit: amt, memo: 'AR pay-down ' + (sale.customerName || sale.id || '') });
+        if (excess > 0 && !isAcctCredit) {
+          lines.push({ accountCode: '2200', debit: 0, credit: excess, memo: 'Excess credited to customer account' });
+        }
+      } else if (excess > 0) {
+        lines.push({ accountCode: cashAccountForMethod(method), debit: excess, credit: 0, memo: 'Customer deposit' });
+        lines.push({ accountCode: '2200', debit: 0, credit: excess, memo: 'Excess credited to customer account' });
+      }
       return postJournal(auth, {
         sourceType: 'customer-receipt',
         sourceId: receiptKey || (sale.id + '-rcpt-' + amt + '-' + Date.now()),
@@ -1041,17 +1085,18 @@ globalThis.__neoSchemaReady = true;
       });
     };
 
-    const journalPurchaseReceive = async (auth, po, branchId) => {
+    const journalPurchaseReceive = async (auth, po, branchId, receiveKey) => {
       const amount = Number(po.amount) || 0;
       if (amount <= 0) return null;
+      const resolvedBr = branchId || po.branchId || '';
       const lines = [
         { accountCode: '1200', debit: amount, credit: 0, memo: 'Stock received ' + (po.itemName || po.id) },
         { accountCode: '2000', debit: 0, credit: amount, memo: 'AP ' + (po.supplierName || '') }
       ];
       return postJournal(auth, {
         sourceType: 'po-receive',
-        sourceId: po.id,
-        branchId,
+        sourceId: receiveKey || po.id,
+        branchId: resolvedBr,
         description: 'PO receive ' + (po.id || ''),
         entryDate: new Date().toISOString().slice(0, 10),
         lines
@@ -1061,6 +1106,7 @@ globalThis.__neoSchemaReady = true;
     const journalPurchasePayment = async (auth, po, payAmount, method, branchId, paymentKey) => {
       const amt = Number(payAmount) || 0;
       if (amt <= 0) return null;
+      const resolvedBr = branchId || po.branchId || '';
       const lines = [
         { accountCode: '2000', debit: amt, credit: 0, memo: 'Pay supplier ' + (po.supplierName || '') },
         { accountCode: cashAccountForMethod(method), debit: 0, credit: amt, memo: 'PO payment' }
@@ -1068,24 +1114,55 @@ globalThis.__neoSchemaReady = true;
       return postJournal(auth, {
         sourceType: 'po-payment',
         sourceId: paymentKey || (po.id + '-pay-' + amt),
-        branchId,
+        branchId: resolvedBr,
         description: 'PO payment ' + (po.id || ''),
         entryDate: new Date().toISOString().slice(0, 10),
         lines
       });
     };
 
-    const journalSalesReturn = async (auth, saleId, refundTotal, method, cogsRestore, branchId) => {
-      const amt = Number(refundTotal) || 0;
+    const journalExpensePayment = async (auth, exp, payAmount, method, branchId, paymentKey) => {
+      const amt = Math.round((Number(payAmount) || 0) * 100) / 100;
+      if (amt <= 0) return null;
+      const resolvedBr = branchId || exp?.branchId || '';
+      const lines = [
+        { accountCode: '2000', debit: amt, credit: 0, memo: 'Pay expense payable ' + (exp?.description || exp?.category || exp?.id || '') },
+        { accountCode: cashAccountForMethod(method), debit: 0, credit: amt, memo: 'Expense payment' }
+      ];
+      return postJournal(auth, {
+        sourceType: 'expense-payment',
+        sourceId: paymentKey || ((exp?.id || 'exp') + '-pay-' + amt + '-' + Date.now()),
+        branchId: resolvedBr,
+        description: 'Expense payment ' + (exp?.description || exp?.category || exp?.id || ''),
+        entryDate: new Date().toISOString().slice(0, 10),
+        lines
+      });
+    };
+
+    const journalSalesReturn = async (auth, saleId, refundTotal, method, cogsRestore, branchId, opts = {}) => {
+      const amt = Math.round((Number(refundTotal) || 0) * 100) / 100;
+      const taxAmt = Math.min(amt, Math.max(0, Math.round((Number(opts.refundTax) || 0) * 100) / 100));
+      const actualCash = opts.actualRefund != null ? Math.min(amt, Math.max(0, Math.round((Number(opts.actualRefund) || 0) * 100) / 100)) : amt;
+      const arReduction = Math.max(0, Math.round((amt - actualCash) * 100) / 100);
+      const netRevReturn = Math.max(0, Math.round((amt - taxAmt) * 100) / 100);
       if (amt <= 0 && !(Number(cogsRestore) > 0)) return null;
       const lines = [];
-      if (amt > 0) {
-        lines.push({ accountCode: '4100', debit: amt, credit: 0, memo: 'Sales return' });
-        lines.push({ accountCode: cashAccountForMethod(method), debit: 0, credit: amt, memo: 'Refund' });
+      if (netRevReturn > 0) {
+        lines.push({ accountCode: '4100', debit: netRevReturn, credit: 0, memo: 'Sales return' });
+      }
+      if (taxAmt > 0) {
+        lines.push({ accountCode: '2100', debit: taxAmt, credit: 0, memo: 'Sales tax reversed' });
+      }
+      if (actualCash > 0) {
+        lines.push({ accountCode: cashAccountForMethod(method), debit: 0, credit: actualCash, memo: 'Refund' });
+      }
+      if (arReduction > 0) {
+        lines.push({ accountCode: '1100', debit: 0, credit: arReduction, memo: 'AR reduced on return' });
       }
       if (Number(cogsRestore) > 0) {
-        lines.push({ accountCode: '1200', debit: Number(cogsRestore), credit: 0, memo: 'Stock restored' });
-        lines.push({ accountCode: '5000', debit: 0, credit: Number(cogsRestore), memo: 'COGS reverse' });
+        const cogsAmt = Math.round((Number(cogsRestore) || 0) * 100) / 100;
+        lines.push({ accountCode: '1200', debit: cogsAmt, credit: 0, memo: 'Stock restored' });
+        lines.push({ accountCode: '5000', debit: 0, credit: cogsAmt, memo: 'COGS reverse' });
       }
       return postJournal(auth, {
         sourceType: 'sales-return',
@@ -1124,6 +1201,7 @@ globalThis.__neoSchemaReady = true;
           if (!Array.isArray(list)) list = [];
         }
         const nowIso = (customEntry && customEntry.at) || new Date().toISOString();
+        const resolvedBranch = (customEntry && customEntry.branchId && customEntry.branchId !== 'all' ? String(customEntry.branchId) : '') || requestBranchId() || '';
         const entry = {
           id: (customEntry && customEntry.id) || (`aud-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`),
           at: nowIso,
@@ -1131,6 +1209,7 @@ globalThis.__neoSchemaReady = true;
           action: String(action || (customEntry && customEntry.action) || 'event'),
           entity: String(entity || (customEntry && customEntry.entity) || ''),
           detail: String(detail != null ? detail : ((customEntry && customEntry.detail) || '')),
+          branchId: resolvedBranch,
           tenantId: safeTid
         };
         const nowMs = Date.now();
@@ -1263,8 +1342,13 @@ globalThis.__neoSchemaReady = true;
         roleRow = roles.find(r => (r.name || '').toLowerCase() === (user.role || '').toLowerCase()) || null;
       } catch (_) {}
       const tenant = await getTenant(user.tenantId || 'tenant-default');
+      let userAllowedBr = user.allowedBranches;
+      try { if (typeof userAllowedBr === 'string') userAllowedBr = JSON.parse(userAllowedBr || '[]'); } catch (_) { userAllowedBr = []; }
+      const loginAllowedArr = Array.isArray(userAllowedBr) ? userAllowedBr : (userAllowedBr ? [userAllowedBr] : []);
       try {
-        await appendTenantAuditRecord(userTenantId, user.name, 'login', 'session', `User signed in (${user.role || 'Staff'})`);
+        await appendTenantAuditRecord(userTenantId, user.name, 'login', 'session', `User signed in (${user.role || 'Staff'})`, {
+          branchId: requestBranchId() || (loginAllowedArr.length === 1 ? loginAllowedArr[0] : '')
+        });
         await writeSecurityAudit({ user, tenantId: userTenantId }, 'login', 'session', user.name);
       } catch (_) {}
       let loginShopProfile = null;
@@ -1273,8 +1357,6 @@ globalThis.__neoSchemaReady = true;
         loginShopProfile = await env.DB.prepare('SELECT * FROM shop_profile WHERE tenantId = ? OR id = ? LIMIT 1').bind(pTid, pTid).first();
         if (!loginShopProfile && pTid === 'tenant-default') loginShopProfile = await env.DB.prepare('SELECT * FROM shop_profile WHERE id = 1').first();
       } catch (_) {}
-      let userAllowedBr = user.allowedBranches;
-      try { if (typeof userAllowedBr === 'string') userAllowedBr = JSON.parse(userAllowedBr || '[]'); } catch (_) { userAllowedBr = []; }
       return json({
         token,
         expiresAt,
@@ -1537,6 +1619,7 @@ globalThis.__neoSchemaReady = true;
       'all-data': null, // any authenticated
       restore: 'settings',
       inventory: 'inventory',
+      'inventory-assign-legacy': 'inventory',
       customers: 'customers',
       expenses: 'expenses',
       sales: 'sales',
@@ -2270,9 +2353,28 @@ globalThis.__neoSchemaReady = true;
       // Tenant isolation (skip for super-admin platform view)
       if (!auth.isSuperAdmin) {
         const tid = auth.tenantId || 'tenant-default';
-        inventory = scopeTenant(inventory, tid, false).map(it => ({ ...it, varianceValues: parseJsonObj(it.varianceValues) }));
+        inventory = scopeTenant(inventory, tid, false).map(it => {
+          const allowedBrs = parseJsonArr(it.allowedBranches);
+          const rawAllLoc = it.allLocations === 1 || it.allLocations === true || it.branchId === 'all';
+          const isLegacyUnassigned = (!it.branchId || it.branchId === '') && !rawAllLoc && allowedBrs.length === 0;
+          const allLoc = rawAllLoc || isLegacyUnassigned;
+          return {
+            ...it,
+            varianceValues: parseJsonObj(it.varianceValues),
+            locationQuantities: parseJsonObj(it.locationQuantities),
+            allowedBranches: allowedBrs,
+            rawAllLocations: rawAllLoc,
+            isLegacyUnassigned,
+            allLocations: allLoc
+          };
+        });
         sales = scopeTenant(sales, tid, false).map(s => ({ ...s, returnHistory: parseJsonArr(s.returnHistory), paymentHistory: parseJsonArr(s.paymentHistory) }));
-        customers = scopeTenant(customers, tid, false).map(c => ({ ...c, loyaltyPoints: parseFloat(c.loyaltyPoints) || 0 }));
+        customers = scopeTenant(customers, tid, false).map(c => ({
+          ...c,
+          loyaltyPoints: parseFloat(c.loyaltyPoints) || 0,
+          creditLimit: parseFloat(c.creditLimit) || 0,
+          creditBalance: parseFloat(c.creditBalance) || 0
+        }));
         expenses = scopeTenant(expenses, tid, false).map(e => ({ ...e, paymentHistory: parseJsonArr(e.paymentHistory) }));
         users = scopeTenant(users, tid, false);
         roles = scopeTenant(roles, tid, false);
@@ -2301,10 +2403,17 @@ globalThis.__neoSchemaReady = true;
           return false;
         });
       };
-      const safeUsers = (users || []).map(u => ({
-        id: u.id, name: u.name, role: u.role, phone: u.phone, status: u.status, photo: u.photo || ''
-        // PIN hashes never sent to the client
-      }));
+      const safeUsers = (users || []).map(u => {
+        let ab = [];
+        try {
+          const parsed = typeof u.allowedBranches === 'string' ? JSON.parse(u.allowedBranches || '[]') : u.allowedBranches;
+          ab = Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+        } catch (_) { ab = []; }
+        return {
+          id: u.id, name: u.name, role: u.role, phone: u.phone, status: u.status, photo: u.photo || '', allowedBranches: ab
+          // PIN hashes never sent to the client
+        };
+      });
 
       let stockMovements = [];
       try {
@@ -2580,26 +2689,45 @@ globalThis.__neoSchemaReady = true;
     // 3. INVENTORY CRUD
     if (routeType === 'inventory') {
       const tidInv = auth.tenantId || 'tenant-default';
-      for (const col of ['sku TEXT', 'size TEXT', 'colour TEXT', 'wholesalePrice REAL', 'varianceValues TEXT']) {
+      for (const col of ['sku TEXT', 'size TEXT', 'colour TEXT', 'wholesalePrice REAL', 'varianceValues TEXT', 'locationQuantities TEXT', 'allLocations INTEGER DEFAULT 0', 'allowedBranches TEXT']) {
         try { await env.DB.prepare(`ALTER TABLE inventory ADD COLUMN ${col}`).run(); } catch (_) {}
       }
       if (request.method === 'POST') {
         const body = await request.json();
-        const qty = Math.max(0, Number(body.quantity) || 0);
-        const branchId = await resolveBranchId(tidInv, body.branchId || requestBranchId());
-        if (!branchAllowedForAuth(auth, branchId)) return json({ error: 'Not allowed to manage inventory for this location.' }, 403);
+        const allowedBrs = Array.isArray(body.allowedBranches)
+          ? body.allowedBranches.map(String).filter(Boolean)
+          : (typeof body.allowedBranches === 'string' ? (() => { try { const a = JSON.parse(body.allowedBranches); return Array.isArray(a) ? a.map(String).filter(Boolean) : []; } catch (_) { return []; } })() : []);
+        const isAllLoc = Boolean(body.allLocations || body.branchId === 'all');
+        const isMultiOrAll = isAllLoc || allowedBrs.length > 0;
+        let branchId = '';
+        if (!isMultiOrAll) {
+          branchId = await resolveBranchId(tidInv, body.branchId || requestBranchId());
+          if (!branchAllowedForAuth(auth, branchId)) return json({ error: 'Not allowed to manage inventory for this location.' }, 403);
+        }
+        const locQObj = body.locationQuantities && typeof body.locationQuantities === 'object' && !Array.isArray(body.locationQuantities)
+          ? { ...body.locationQuantities }
+          : (typeof body.locationQuantities === 'string' ? (() => { try { return JSON.parse(body.locationQuantities) || {}; } catch (_) { return {}; } })() : {});
+        let qty = Math.max(0, Number(body.quantity) || 0);
+        if (isMultiOrAll && Object.keys(locQObj).length > 0) {
+          const activeKeys = isAllLoc ? Object.keys(locQObj) : allowedBrs;
+          const sum = activeKeys.reduce((s, k) => s + Math.max(0, Number(locQObj[k]) || 0), 0);
+          qty = sum;
+        }
         const varJson = body.varianceValues != null
           ? (typeof body.varianceValues === 'string' ? body.varianceValues : JSON.stringify(body.varianceValues || {}))
           : '{}';
+        const locQJson = JSON.stringify(locQObj || {});
+        const allowedBrsJson = JSON.stringify(allowedBrs);
+        const allLocVal = isAllLoc ? 1 : 0;
         try {
           await env.DB.prepare(
-            `INSERT INTO inventory (id, name, category, buyingPrice, price, quantity, lowStockAlert, trackInventory, status, photoUrl, tenantId, sku, size, colour, wholesalePrice, branchId, varianceValues) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).bind(body.id, body.name, body.category, body.buyingPrice || 0, body.price || 0, qty, body.lowStockAlert || 2, body.trackInventory ? 1 : 0, body.status || 'Listed', body.photoUrl || '', tidInv, body.sku || '', body.size || '', body.colour || '', body.wholesalePrice || 0, branchId, varJson).run();
+            `INSERT INTO inventory (id, name, category, buyingPrice, price, quantity, lowStockAlert, trackInventory, status, photoUrl, tenantId, sku, size, colour, wholesalePrice, branchId, varianceValues, locationQuantities, allLocations, allowedBranches) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(body.id, body.name, body.category, body.buyingPrice || 0, body.price || 0, qty, body.lowStockAlert || 2, body.trackInventory ? 1 : 0, body.status || 'Listed', body.photoUrl || '', tidInv, body.sku || '', body.size || '', body.colour || '', body.wholesalePrice || 0, branchId, varJson, locQJson, allLocVal, allowedBrsJson).run();
         } catch (_) {
           try {
             await env.DB.prepare(
-              `INSERT INTO inventory (id, name, category, buyingPrice, price, quantity, lowStockAlert, trackInventory, status, photoUrl, tenantId, sku, size, colour, wholesalePrice, branchId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            ).bind(body.id, body.name, body.category, body.buyingPrice || 0, body.price || 0, qty, body.lowStockAlert || 2, body.trackInventory ? 1 : 0, body.status || 'Listed', body.photoUrl || '', tidInv, body.sku || '', body.size || '', body.colour || '', body.wholesalePrice || 0, branchId).run();
+              `INSERT INTO inventory (id, name, category, buyingPrice, price, quantity, lowStockAlert, trackInventory, status, photoUrl, tenantId, sku, size, colour, wholesalePrice, branchId, varianceValues) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(body.id, body.name, body.category, body.buyingPrice || 0, body.price || 0, qty, body.lowStockAlert || 2, body.trackInventory ? 1 : 0, body.status || 'Listed', body.photoUrl || '', tidInv, body.sku || '', body.size || '', body.colour || '', body.wholesalePrice || 0, branchId, varJson).run();
           } catch (__) {
             try {
               await env.DB.prepare(
@@ -2617,12 +2745,31 @@ globalThis.__neoSchemaReady = true;
       if (request.method === 'PUT' && id) {
         const body = await request.json();
         if (Number(body.quantity) < 0) return json({ error: 'Quantity cannot be negative.' }, 400);
-        const safeQty = Math.max(0, Number(body.quantity) || 0);
+        const locQObj = body.locationQuantities && typeof body.locationQuantities === 'object' && !Array.isArray(body.locationQuantities)
+          ? body.locationQuantities
+          : (typeof body.locationQuantities === 'string' ? (() => { try { return JSON.parse(body.locationQuantities) || {}; } catch (_) { return null; } })() : null);
+        const allowedBrs = body.allowedBranches != null
+          ? (Array.isArray(body.allowedBranches) ? body.allowedBranches.map(String).filter(Boolean) : (() => { try { const a = JSON.parse(body.allowedBranches); return Array.isArray(a) ? a.map(String).filter(Boolean) : []; } catch (_) { return []; } })())
+          : null;
+        const isAllLoc = body.allLocations != null ? Boolean(body.allLocations) : null;
+        let safeQty = Math.max(0, Number(body.quantity) || 0);
+        if (locQObj && (isAllLoc || (allowedBrs && allowedBrs.length > 0)) && Object.keys(locQObj).length > 0) {
+          const activeKeys = isAllLoc ? Object.keys(locQObj) : allowedBrs;
+          safeQty = activeKeys.reduce((s, k) => s + Math.max(0, Number(locQObj[k]) || 0), 0);
+        }
         const varJson = body.varianceValues != null
           ? (typeof body.varianceValues === 'string' ? body.varianceValues : JSON.stringify(body.varianceValues || {}))
           : null;
+        const locQJson = locQObj != null ? JSON.stringify(locQObj) : null;
+        const allowedBrsJson = allowedBrs != null ? JSON.stringify(allowedBrs) : null;
+        const allLocVal = isAllLoc != null ? (isAllLoc ? 1 : 0) : null;
+        const nextBranchId = (isAllLoc || (allowedBrs && allowedBrs.length > 0)) ? '' : (body.branchId != null ? body.branchId : null);
         try {
-          if (varJson != null) {
+          if (locQJson != null && allLocVal != null) {
+            await env.DB.prepare(
+              `UPDATE inventory SET name = ?, category = ?, buyingPrice = ?, price = ?, quantity = ?, lowStockAlert = ?, trackInventory = ?, status = ?, photoUrl = ?, sku = ?, size = ?, colour = ?, wholesalePrice = ?, varianceValues = ?, locationQuantities = ?, allLocations = ?, allowedBranches = COALESCE(?, allowedBranches), branchId = COALESCE(?, branchId) WHERE id = ? AND tenantId = ?`
+            ).bind(body.name, body.category, body.buyingPrice || 0, body.price || 0, safeQty, body.lowStockAlert || 2, body.trackInventory ? 1 : 0, body.status, body.photoUrl || '', body.sku || '', body.size || '', body.colour || '', body.wholesalePrice || 0, varJson || '{}', locQJson, allLocVal, allowedBrsJson, nextBranchId, id, tidInv).run();
+          } else if (varJson != null) {
             await env.DB.prepare(
               `UPDATE inventory SET name = ?, category = ?, buyingPrice = ?, price = ?, quantity = ?, lowStockAlert = ?, trackInventory = ?, status = ?, photoUrl = ?, sku = ?, size = ?, colour = ?, wholesalePrice = ?, varianceValues = ? WHERE id = ? AND tenantId = ?`
             ).bind(body.name, body.category, body.buyingPrice || 0, body.price || 0, safeQty, body.lowStockAlert || 2, body.trackInventory ? 1 : 0, body.status, body.photoUrl || '', body.sku || '', body.size || '', body.colour || '', body.wholesalePrice || 0, varJson, id, tidInv).run();
@@ -2639,15 +2786,99 @@ globalThis.__neoSchemaReady = true;
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
       if (request.method === 'DELETE' && id) {
-        const delItem = await env.DB.prepare(`SELECT name FROM inventory WHERE id = ? AND tenantId = ?`).bind(id, tidInv).first().catch(() => null);
+        const delItem = await env.DB.prepare(`SELECT name, branchId FROM inventory WHERE id = ? AND tenantId = ?`).bind(id, tidInv).first().catch(() => null);
         await env.DB.prepare(`DELETE FROM inventory WHERE id = ? AND tenantId = ?`).bind(id, tidInv).run();
         try { await env.DB.prepare(`DELETE FROM stock_movements WHERE tenantId = ? AND itemId = ?`).bind(tidInv, id).run(); } catch (_) {}
         try {
           await writeSecurityAudit(auth, 'delete', routeType, id);
-          await appendTenantAuditRecord(tidInv, auth.user?.name || 'Staff', 'delete', 'inventory', `${delItem?.name || id} (${id})`);
+          await appendTenantAuditRecord(tidInv, auth.user?.name || 'Staff', 'delete', 'inventory', `${delItem?.name || id} (${id})`, { branchId: delItem?.branchId || requestBranchId() || '' });
         } catch (_) {}
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
+    }
+
+    // 3b. LEGACY SHARED ITEMS ONE-TIME ASSIGNMENT / BRANCH DUPLICATION
+    if (routeType === 'inventory-assign-legacy' && request.method === 'POST') {
+      const tidInv = auth.tenantId || 'tenant-default';
+      for (const col of ['sku TEXT', 'size TEXT', 'colour TEXT', 'wholesalePrice REAL', 'varianceValues TEXT', 'locationQuantities TEXT', 'allLocations INTEGER DEFAULT 0', 'allowedBranches TEXT']) {
+        try { await env.DB.prepare(`ALTER TABLE inventory ADD COLUMN ${col}`).run(); } catch (_) {}
+      }
+      const body = await request.json().catch(() => ({}));
+      const mode = body.mode === 'duplicate' ? 'duplicate' : 'assign';
+      const branches = await listBranches(tidInv);
+      const validBrIds = new Set(branches.map(b => String(b.id)));
+      const nowIso = new Date().toISOString();
+      let updatedCount = 0;
+      let createdCount = 0;
+
+      if (mode === 'assign') {
+        const targetBranchId = String(body.branchId || '').trim();
+        if (!targetBranchId || !validBrIds.has(targetBranchId)) return json({ error: 'Valid destination branchId required.' }, 400);
+        if (!branchAllowedForAuth(auth, targetBranchId)) return json({ error: 'Not allowed to assign items to this location.' }, 403);
+        const itemIds = Array.isArray(body.itemIds) ? body.itemIds.map(String).filter(Boolean) : [];
+        if (!itemIds.length) return json({ error: 'Select at least one legacy item.' }, 400);
+        for (const itemId of itemIds) {
+          const row = await env.DB.prepare(`SELECT * FROM inventory WHERE id = ? AND tenantId = ?`).bind(itemId, tidInv).first();
+          if (!row) continue;
+          await env.DB.prepare(
+            `UPDATE inventory SET branchId = ?, allLocations = 0, allowedBranches = '[]', locationQuantities = '{}' WHERE id = ? AND tenantId = ?`
+          ).bind(targetBranchId, itemId, tidInv).run();
+          updatedCount++;
+          try {
+            await env.DB.prepare(
+              `INSERT INTO stock_movements (id, tenantId, branchId, itemId, itemName, qtyChange, reason, ref, userName, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(`sm-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, tidInv, targetBranchId, itemId, row.name || itemId, 0, 'Legacy Assign Location', itemId, auth.user?.name || 'Admin', nowIso).run();
+          } catch (_) {}
+        }
+        try {
+          await appendTenantAuditRecord(tidInv, auth.user?.name || 'Admin', 'legacy-assign', 'inventory', `Assigned ${updatedCount} legacy item(s) to branch ${targetBranchId}`, { branchId: targetBranchId });
+        } catch (_) {}
+        return json({ success: true, mode, updatedCount, createdCount });
+      }
+
+      // Duplicate / split mode: { items: [{ id, allocations: [{ branchId, qty }] }] }
+      const reqItems = Array.isArray(body.items) ? body.items : [];
+      if (!reqItems.length) return json({ error: 'Provide items with branch allocations.' }, 400);
+      for (const entry of reqItems) {
+        const srcId = String(entry.id || '').trim();
+        if (!srcId) continue;
+        const src = await env.DB.prepare(`SELECT * FROM inventory WHERE id = ? AND tenantId = ?`).bind(srcId, tidInv).first();
+        if (!src) continue;
+        const rawAllocs = Array.isArray(entry.allocations) ? entry.allocations : [];
+        const cleanAllocs = [];
+        for (const al of rawAllocs) {
+          const bid = String(al.branchId || '').trim();
+          const q = Math.max(0, Number(al.qty) || 0);
+          if (!bid || !validBrIds.has(bid)) continue;
+          if (!branchAllowedForAuth(auth, bid)) return json({ error: `Not allowed for location ${bid}.` }, 403);
+          cleanAllocs.push({ branchId: bid, qty: q });
+        }
+        if (!cleanAllocs.length) continue;
+        const first = cleanAllocs[0];
+        await env.DB.prepare(
+          `UPDATE inventory SET branchId = ?, quantity = ?, allLocations = 0, allowedBranches = '[]', locationQuantities = '{}', status = CASE WHEN ? > 0 AND status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ? AND tenantId = ?`
+        ).bind(first.branchId, first.qty, first.qty, src.id, tidInv).run();
+        updatedCount++;
+        for (let k = 1; k < cleanAllocs.length; k++) {
+          const al = cleanAllocs[k];
+          const cloneId = `item-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+          const cloneStatus = al.qty > 0 ? (src.status === 'Sold' ? 'Listed' : (src.status || 'Listed')) : (src.status || 'Listed');
+          await env.DB.prepare(
+            `INSERT INTO inventory (id, name, category, buyingPrice, price, quantity, lowStockAlert, trackInventory, status, photoUrl, tenantId, sku, size, colour, wholesalePrice, branchId, varianceValues, locationQuantities, allLocations, allowedBranches)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', 0, '[]')`
+          ).bind(
+            cloneId, src.name, src.category, src.buyingPrice || 0, src.price || 0, al.qty,
+            src.lowStockAlert || 2, src.trackInventory ? 1 : 0, cloneStatus, src.photoUrl || '',
+            tidInv, src.sku || '', src.size || '', src.colour || '', src.wholesalePrice || 0,
+            al.branchId, typeof src.varianceValues === 'string' ? src.varianceValues : JSON.stringify(src.varianceValues || {})
+          ).run();
+          createdCount++;
+        }
+      }
+      try {
+        await appendTenantAuditRecord(tidInv, auth.user?.name || 'Admin', 'legacy-duplicate', 'inventory', `Converted ${updatedCount} legacy item(s) into ${updatedCount + createdCount} per-branch rows`, { branchId: requestBranchId() || '' });
+      } catch (_) {}
+      return json({ success: true, mode, updatedCount, createdCount });
     }
 
     // 4. CUSTOMERS CRUD
@@ -2658,21 +2889,23 @@ globalThis.__neoSchemaReady = true;
         const tid = auth.tenantId || 'tenant-default';
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN loyaltyPoints REAL DEFAULT 0`).run(); } catch (_) {}
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN creditLimit REAL DEFAULT 0`).run(); } catch (_) {}
+        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN creditBalance REAL DEFAULT 0`).run(); } catch (_) {}
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN salesTermId TEXT`).run(); } catch (_) {}
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN paymentTerm TEXT`).run(); } catch (_) {}
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN tags TEXT`).run(); } catch (_) {}
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN priceList TEXT`).run(); } catch (_) {}
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN kraPin TEXT`).run(); } catch (_) {}
         const creditLimitNum = parseFloat(body.creditLimit) || 0;
+        const creditBalanceNum = parseFloat(body.creditBalance) || 0;
         try {
           await env.DB.prepare(
-            `INSERT INTO customers (id, name, phone, location, eligibility, loyaltyPoints, creditLimit, salesTermId, paymentTerm, tags, priceList, kraPin, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).bind(body.id, body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, creditLimitNum, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', tid).run();
+            `INSERT INTO customers (id, name, phone, location, eligibility, loyaltyPoints, creditLimit, creditBalance, salesTermId, paymentTerm, tags, priceList, kraPin, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(body.id, body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, creditLimitNum, creditBalanceNum, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', tid).run();
         } catch (_) {
           try {
             await env.DB.prepare(
-              `INSERT INTO customers (id, name, phone, location, eligibility, loyaltyPoints, salesTermId, paymentTerm, tags, priceList, kraPin, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            ).bind(body.id, body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', tid).run();
+              `INSERT INTO customers (id, name, phone, location, eligibility, loyaltyPoints, creditLimit, salesTermId, paymentTerm, tags, priceList, kraPin, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(body.id, body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, creditLimitNum, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', tid).run();
           } catch (__) {
             await env.DB.prepare(
               `INSERT INTO customers (id, name, phone, location, eligibility, tenantId) VALUES (?, ?, ?, ?, ?, ?)`
@@ -2687,16 +2920,23 @@ globalThis.__neoSchemaReady = true;
         const tid = auth.tenantId || 'tenant-default';
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN loyaltyPoints REAL DEFAULT 0`).run(); } catch (_) {}
         try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN creditLimit REAL DEFAULT 0`).run(); } catch (_) {}
+        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN creditBalance REAL DEFAULT 0`).run(); } catch (_) {}
+        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN salesTermId TEXT`).run(); } catch (_) {}
+        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN paymentTerm TEXT`).run(); } catch (_) {}
+        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN tags TEXT`).run(); } catch (_) {}
+        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN priceList TEXT`).run(); } catch (_) {}
+        try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN kraPin TEXT`).run(); } catch (_) {}
         const creditLimitNum = parseFloat(body.creditLimit) || 0;
+        const creditBalanceNum = parseFloat(body.creditBalance) || 0;
         try {
           await env.DB.prepare(
-            `UPDATE customers SET name = ?, phone = ?, location = ?, eligibility = ?, loyaltyPoints = ?, creditLimit = ?, salesTermId = ?, paymentTerm = ?, tags = ?, priceList = ?, kraPin = ? WHERE id = ? AND tenantId = ?`
-          ).bind(body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, creditLimitNum, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', id, tid).run();
+            `UPDATE customers SET name = ?, phone = ?, location = ?, eligibility = ?, loyaltyPoints = ?, creditLimit = ?, creditBalance = ?, salesTermId = ?, paymentTerm = ?, tags = ?, priceList = ?, kraPin = ? WHERE id = ? AND tenantId = ?`
+          ).bind(body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, creditLimitNum, creditBalanceNum, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', id, tid).run();
         } catch (_) {
           try {
             await env.DB.prepare(
-              `UPDATE customers SET name = ?, phone = ?, location = ?, eligibility = ?, loyaltyPoints = ?, salesTermId = ?, paymentTerm = ?, tags = ?, priceList = ?, kraPin = ? WHERE id = ? AND tenantId = ?`
-            ).bind(body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', id, tid).run();
+              `UPDATE customers SET name = ?, phone = ?, location = ?, eligibility = ?, loyaltyPoints = ?, creditLimit = ?, salesTermId = ?, paymentTerm = ?, tags = ?, priceList = ?, kraPin = ? WHERE id = ? AND tenantId = ?`
+            ).bind(body.name, body.phone || '', body.location || '', eligibilityJson, parseFloat(body.loyaltyPoints) || 0, creditLimitNum, body.salesTermId || '', body.paymentTerm || '', body.tags || '', body.priceList || 'retail', body.kraPin || '', id, tid).run();
           } catch (__) {
             try {
               await env.DB.prepare(
@@ -2765,7 +3005,7 @@ globalThis.__neoSchemaReady = true;
         }
         try { await journalExpense(auth, { ...body, amount, paidAmount, balanceDue, paymentStatus }, branchId); } catch (_) {}
         if (paidAmount > 0) {
-          try { await appendTenantAuditRecord(tid, auth.user?.name || body.payer || 'Staff', 'payment', 'expense', `${body.description || body.category} — Paid ${paidAmount} via ${body.paymentMethod || 'Cash'}`); } catch (_) {}
+          try { await appendTenantAuditRecord(tid, auth.user?.name || body.payer || 'Staff', 'payment', 'expense', `${body.description || body.category} — Paid ${paidAmount} via ${body.paymentMethod || 'Cash'}`, { branchId }); } catch (_) {}
         }
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
@@ -2776,7 +3016,8 @@ globalThis.__neoSchemaReady = true;
         const balanceDue = body.balanceDue != null ? parseFloat(body.balanceDue) : Math.max(0, amount - paidAmount);
         const paymentStatus = body.paymentStatus || (balanceDue <= 0 ? 'Paid' : (paidAmount > 0 ? 'Partially Paid' : 'Unpaid'));
         const tid = auth.tenantId || 'tenant-default';
-        const prevExp = await env.DB.prepare(`SELECT paidAmount, description, category FROM expenses WHERE id = ? AND tenantId = ?`).bind(id, tid).first().catch(() => null);
+        const prevExp = await env.DB.prepare(`SELECT paidAmount, description, category, branchId FROM expenses WHERE id = ? AND tenantId = ?`).bind(id, tid).first().catch(() => null);
+        const expBranchId = (body.branchId && body.branchId !== 'all' ? body.branchId : '') || prevExp?.branchId || requestBranchId() || (await resolveBranchId(tid, null)) || '';
         const prevPaid = prevExp ? (parseFloat(prevExp.paidAmount) || 0) : 0;
         const payHistJson = body.paymentHistory != null ? (typeof body.paymentHistory === 'string' ? body.paymentHistory : JSON.stringify(body.paymentHistory)) : null;
         try {
@@ -2795,18 +3036,20 @@ globalThis.__neoSchemaReady = true;
           ).bind(body.date, body.category, body.description, amount, body.paymentMethod, body.mpesaCode || '', body.payer || '', body.paidTo || '', id, tid).run();
         }
         const deltaPaid = Math.round((paidAmount - prevPaid) * 100) / 100;
-        if (deltaPaid > 0) {
-          try { await appendTenantAuditRecord(tid, auth.user?.name || body.payer || 'Staff', 'payment', 'expense', `${body.description || body.category || id} — Paid +${deltaPaid} via ${body.paymentMethod || 'Cash'}`); } catch (_) {}
+        if (deltaPaid > 0.009) {
+          const expMethod = body.lastPaymentMethod || body.paymentMethod || 'Cash';
+          try { await journalExpensePayment(auth, { id, description: body.description || prevExp?.description, category: body.category || prevExp?.category, branchId: expBranchId }, deltaPaid, expMethod, expBranchId, `${id}-pay-${paidAmount}-${Date.now()}`); } catch (_) {}
+          try { await appendTenantAuditRecord(tid, auth.user?.name || body.payer || 'Staff', 'payment', 'expense', `${body.description || body.category || id} — Paid +${deltaPaid} via ${expMethod}`, { branchId: expBranchId }); } catch (_) {}
         }
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
       if (request.method === 'DELETE' && id) {
         const tid = auth.tenantId || 'tenant-default';
-        const delExp = await env.DB.prepare(`SELECT description, category, amount FROM expenses WHERE id = ? AND tenantId = ?`).bind(id, tid).first().catch(() => null);
+        const delExp = await env.DB.prepare(`SELECT description, category, amount, branchId FROM expenses WHERE id = ? AND tenantId = ?`).bind(id, tid).first().catch(() => null);
         await env.DB.prepare(`DELETE FROM expenses WHERE id = ? AND tenantId = ?`).bind(id, tid).run();
         try {
           await writeSecurityAudit(auth, 'delete', routeType, id);
-          await appendTenantAuditRecord(tid, auth.user?.name || 'Staff', 'delete', 'expense', `${delExp?.description || delExp?.category || id} (${id})`);
+          await appendTenantAuditRecord(tid, auth.user?.name || 'Staff', 'delete', 'expense', `${delExp?.description || delExp?.category || id} (${id})`, { branchId: delExp?.branchId || requestBranchId() || '' });
         } catch (_) {}
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
@@ -2824,6 +3067,7 @@ globalThis.__neoSchemaReady = true;
       try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN taxRate REAL').run(); } catch (_) {}
       try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN taxName TEXT').run(); } catch (_) {}
       try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN tenantId TEXT').run(); } catch (_) {}
+      try { await env.DB.prepare('ALTER TABLE sales ADD COLUMN idempotencyKey TEXT').run(); } catch (_) {}
       if (request.method === 'POST') {
         const body = await request.json();
         if (!body || !body.id) return json({ error: 'Sale id is required' }, 400);
@@ -2844,6 +3088,17 @@ globalThis.__neoSchemaReady = true;
           }
         } catch (_) {}
 
+        // Idempotency guard: prevent double-posting or double stock decrement on retries/double-clicks
+        const idemKey = String(body.idempotencyKey || body.id || '').trim();
+        try {
+          const existingSale = await env.DB.prepare(
+            `SELECT id, branchId FROM sales WHERE tenantId = ? AND (id = ? OR (? != '' AND idempotencyKey = ?)) LIMIT 1`
+          ).bind(tenantId, body.id, idemKey, idemKey).first();
+          if (existingSale && existingSale.id) {
+            return json({ success: true, id: existingSale.id, deduplicated: true, stockAdjusted: 0 });
+          }
+        } catch (_) {}
+
         const tracks = (v) => v === true || v === 1 || v === '1' || v === 'true';
         const trackedLines = [];
         for (const item of saleItems) {
@@ -2853,7 +3108,7 @@ globalThis.__neoSchemaReady = true;
           let stock = null;
           try {
             stock = await env.DB.prepare(
-              `SELECT id, quantity, name, tenantId FROM inventory WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') LIMIT 1`
+              `SELECT id, quantity, name, tenantId, locationQuantities, allLocations, allowedBranches, branchId FROM inventory WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') LIMIT 1`
             ).bind(item.id, tenantId).first();
           } catch (_) {
             try {
@@ -2861,59 +3116,105 @@ globalThis.__neoSchemaReady = true;
             } catch (__) {}
           }
           if (!stock) {
-            // Do not block the whole sale for a missing catalog row — skip stock movement
             console.log('sale: inventory row missing', item.id);
             continue;
           }
-          const available = Number(stock.quantity) || 0;
-          if (available < qty) {
-            return json({ error: `Insufficient stock for ${item.name || stock.name || item.id}. Available: ${available}; requested: ${qty}.` }, 409);
+          let locQ = {};
+          try { locQ = typeof stock.locationQuantities === 'string' ? JSON.parse(stock.locationQuantities || '{}') : (stock.locationQuantities || {}); } catch (_) { locQ = {}; }
+          if (!locQ || typeof locQ !== 'object' || Array.isArray(locQ)) locQ = {};
+          let allowedBrs = [];
+          try { allowedBrs = typeof stock.allowedBranches === 'string' ? JSON.parse(stock.allowedBranches || '[]') : (stock.allowedBranches || []); } catch (_) { allowedBrs = []; }
+          const usesLocMap = Boolean(branchId && (stock.allLocations === 1 || stock.allLocations === true || (Array.isArray(allowedBrs) && allowedBrs.length > 0) || Object.keys(locQ).length > 0));
+          if (!usesLocMap && branchId && stock.branchId && String(stock.branchId) !== String(branchId)) {
+            return json({ error: `Stock item ${item.name || stock.name || item.id} belongs to another location and cannot be sold from this branch.` }, 409);
           }
-          trackedLines.push({ id: item.id, qty, name: item.name || stock.name || item.id, before: available });
+          let available = Number(stock.quantity) || 0;
+          if (usesLocMap) {
+            if (locQ[branchId] !== undefined && locQ[branchId] !== null && locQ[branchId] !== '') {
+              available = Number(locQ[branchId]) || 0;
+            } else if (Object.keys(locQ).length === 0 && (stock.allLocations === 1 || stock.allLocations === true || !stock.branchId || stock.branchId === branchId)) {
+              available = Number(stock.quantity) || 0;
+            } else if (stock.branchId === branchId) {
+              available = Number(stock.quantity) || 0;
+            } else {
+              available = 0;
+            }
+          }
+          if (available < qty) {
+            return json({ error: `Insufficient stock for ${item.name || stock.name || item.id}. Available at this location: ${available}; requested: ${qty}.` }, 409);
+          }
+          trackedLines.push({ id: item.id, qty, name: item.name || stock.name || item.id, before: available, usesLocMap, prevLocQ: { ...locQ }, prevQty: Number(stock.quantity) || 0, stockBranchId: stock.branchId || '' });
         }
 
-        // Decrement stock (best effort; verify qty)
+        // Decrement stock (best effort; verify qty & exact location branchId)
         for (let i = 0; i < trackedLines.length; i++) {
           const t = trackedLines[i];
           try {
-            const result = await env.DB.prepare(
-              `UPDATE inventory SET quantity = quantity - ?, status = CASE WHEN quantity - ? <= 0 THEN 'Sold' ELSE status END
-               WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') AND quantity >= ?`
-            ).bind(t.qty, t.qty, t.id, tenantId, t.qty).run();
-            const changes = result && result.meta != null && result.meta.changes != null ? Number(result.meta.changes) : null;
-            if (changes === 0) {
-              for (let j = 0; j < i; j++) {
-                try {
-                  await env.DB.prepare(
-                    `UPDATE inventory SET quantity = quantity + ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '')`
-                  ).bind(trackedLines[j].qty, trackedLines[j].id, tenantId).run();
-                } catch (_) {}
+            if (t.usesLocMap && branchId) {
+              const nextLocQ = { ...t.prevLocQ, [branchId]: Math.max(0, t.before - t.qty) };
+              const nextTotalQty = Object.keys(t.prevLocQ).length > 0
+                ? Object.values(nextLocQ).reduce((s, v) => s + Math.max(0, Number(v) || 0), 0)
+                : Math.max(0, t.prevQty - t.qty);
+              const nextLocQJson = JSON.stringify(nextLocQ);
+              const result = await env.DB.prepare(
+                `UPDATE inventory SET quantity = ?, locationQuantities = ?, status = CASE WHEN ? <= 0 THEN 'Sold' ELSE status END
+                 WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '')`
+              ).bind(nextTotalQty, nextLocQJson, nextTotalQty, t.id, tenantId).run();
+              const changes = result && result.meta != null && result.meta.changes != null ? Number(result.meta.changes) : null;
+              if (changes === 0) {
+                throw new Error('Concurrent modification');
               }
-              return json({ error: `Insufficient stock for ${t.name} (concurrent sale). Refresh and try again.` }, 409);
+            } else {
+              const sqlNonShared = branchId
+                ? `UPDATE inventory SET quantity = quantity - ?, status = CASE WHEN quantity - ? <= 0 THEN 'Sold' ELSE status END WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') AND (branchId = ? OR branchId IS NULL OR branchId = '') AND quantity >= ?`
+                : `UPDATE inventory SET quantity = quantity - ?, status = CASE WHEN quantity - ? <= 0 THEN 'Sold' ELSE status END WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') AND quantity >= ?`;
+              const result = branchId
+                ? await env.DB.prepare(sqlNonShared).bind(t.qty, t.qty, t.id, tenantId, branchId, t.qty).run()
+                : await env.DB.prepare(sqlNonShared).bind(t.qty, t.qty, t.id, tenantId, t.qty).run();
+              const changes = result && result.meta != null && result.meta.changes != null ? Number(result.meta.changes) : null;
+              if (changes === 0) {
+                for (let j = 0; j < i; j++) {
+                  const prevT = trackedLines[j];
+                  try {
+                    if (prevT.usesLocMap && branchId) {
+                      await env.DB.prepare(`UPDATE inventory SET quantity = ?, locationQuantities = ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ?`).bind(prevT.prevQty, JSON.stringify(prevT.prevLocQ), prevT.id).run();
+                    } else {
+                      await env.DB.prepare(
+                        `UPDATE inventory SET quantity = quantity + ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '')`
+                      ).bind(prevT.qty, prevT.id, tenantId).run();
+                    }
+                  } catch (_) {}
+                }
+                return json({ error: `Insufficient stock for ${t.name} at this branch (or concurrent sale). Refresh and try again.` }, 409);
+              }
             }
           } catch (e) {
-            // Fallback update without tenant filter
-            try {
-              await env.DB.prepare(
-                `UPDATE inventory SET quantity = quantity - ? WHERE id = ? AND quantity >= ?`
-              ).bind(t.qty, t.id, t.qty).run();
-            } catch (e2) {
-              for (let j = 0; j < i; j++) {
-                try {
-                  await env.DB.prepare(`UPDATE inventory SET quantity = quantity + ? WHERE id = ?`).bind(trackedLines[j].qty, trackedLines[j].id).run();
-                } catch (_) {}
-              }
-              return json({ error: `Stock update failed for ${t.name}: ${(e2 && e2.message) || (e && e.message) || 'db'}` }, 500);
+            for (let j = 0; j < i; j++) {
+              const prevT = trackedLines[j];
+              try {
+                if (prevT.usesLocMap && branchId) {
+                  await env.DB.prepare(`UPDATE inventory SET quantity = ?, locationQuantities = ? WHERE id = ?`).bind(prevT.prevQty, JSON.stringify(prevT.prevLocQ), prevT.id).run();
+                } else {
+                  await env.DB.prepare(`UPDATE inventory SET quantity = quantity + ? WHERE id = ?`).bind(prevT.qty, prevT.id).run();
+                }
+              } catch (_) {}
             }
+            return json({ error: `Stock update failed for ${t.name}: ${(e && e.message) || 'db'}` }, 500);
           }
         }
 
         const restoreStock = async () => {
           for (const t of trackedLines) {
             try {
-              await env.DB.prepare(
-                `UPDATE inventory SET quantity = quantity + ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ?`
-              ).bind(t.qty, t.id).run();
+              if (t.usesLocMap && branchId) {
+                await env.DB.prepare(
+                  `UPDATE inventory SET quantity = ?, locationQuantities = ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ?`
+                ).bind(t.prevQty, JSON.stringify(t.prevLocQ), t.id).run();
+              } else {
+                await env.DB.prepare(
+                  `UPDATE inventory SET quantity = quantity + ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ?`
+                ).bind(t.qty, t.id).run();
+              }
             } catch (_) {}
           }
         };
@@ -2950,6 +3251,10 @@ globalThis.__neoSchemaReady = true;
         let saleInserted = false;
         let lastErr = null;
         const attempts = [
+          async () => env.DB.prepare(
+            `INSERT INTO sales (id, date, customerName, saleType, items, totalAmount, paymentMethod, mpesaCode, cashier, paidAmount, balanceDue, deadline, subtotal, taxAmount, taxRate, taxName, tenantId, taxInclusive, branchId, paymentHistory, idempotencyKey)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(vals.id, vals.date, vals.customerName, vals.saleType, vals.itemsJson, vals.totalAmount, vals.paymentMethod, vals.mpesaCode, vals.cashier, vals.paidAmount, vals.balanceDue, vals.deadline, vals.subtotal, vals.taxAmount, vals.taxRate, vals.taxName, vals.tenantId, vals.taxInclusive, vals.branchId, salePayHistJson, idemKey).run(),
           async () => env.DB.prepare(
             `INSERT INTO sales (id, date, customerName, saleType, items, totalAmount, paymentMethod, mpesaCode, cashier, paidAmount, balanceDue, deadline, subtotal, taxAmount, taxRate, taxName, tenantId, taxInclusive, branchId, paymentHistory)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -3012,9 +3317,31 @@ globalThis.__neoSchemaReady = true;
           }
         } catch (_) {}
 
+        // Server-side customer account credit update (used on sale & excess payment credited to customer account)
+        let updatedCustomerCredit = null;
+        try {
+          const acctUsed = Math.max(0, parseFloat(body.accountCreditUsed) || 0);
+          const acctExcess = Math.max(0, parseFloat(body.excessCredit) || 0);
+          if ((acctUsed > 0 || acctExcess > 0) && (body.customerId || vals.customerName)) {
+            try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN creditBalance REAL DEFAULT 0`).run(); } catch (_) {}
+            let custRow = null;
+            if (body.customerId) {
+              custRow = await env.DB.prepare(`SELECT id, creditBalance FROM customers WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') LIMIT 1`).bind(body.customerId, tenantId).first();
+            }
+            if (!custRow && vals.customerName) {
+              custRow = await env.DB.prepare(`SELECT id, creditBalance FROM customers WHERE LOWER(name) = LOWER(?) AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') LIMIT 1`).bind(vals.customerName, tenantId).first();
+            }
+            if (custRow && custRow.id) {
+              const nextBal = Math.round(Math.max(0, (parseFloat(custRow.creditBalance) || 0) - acctUsed + acctExcess) * 100) / 100;
+              await env.DB.prepare(`UPDATE customers SET creditBalance = ? WHERE id = ?`).bind(nextBal, custRow.id).run();
+              updatedCustomerCredit = { customerId: custRow.id, creditBalance: nextBal };
+            }
+          }
+        } catch (_) {}
+
         if (vals.paidAmount > 0) {
           try {
-            await appendTenantAuditRecord(tenantId, auth.user?.name || vals.cashier || 'Staff', 'payment', 'sales', `Sale ${vals.id} (${vals.customerName}) — Paid ${vals.paidAmount} via ${vals.paymentMethod}`);
+            await appendTenantAuditRecord(tenantId, auth.user?.name || vals.cashier || 'Staff', 'payment', 'sales', `Sale ${vals.id} (${vals.customerName}) — Paid ${vals.paidAmount} via ${vals.paymentMethod}`, { branchId: branchId || '' });
           } catch (_) {}
         }
 
@@ -3026,7 +3353,7 @@ globalThis.__neoSchemaReady = true;
           console.log('journalSale failed', je && je.message);
         }
 
-        return json({ success: true, id: body.id, journalId: journalId || null, stockAdjusted: trackedLines.length, customerLoyalty: updatedCustomerLoyaltyPoints });
+        return json({ success: true, id: body.id, journalId: journalId || null, stockAdjusted: trackedLines.length, customerLoyalty: updatedCustomerLoyaltyPoints, customerCredit: updatedCustomerCredit });
       }
       if (request.method === 'PUT' && id) {
         const body = await request.json();
@@ -3034,16 +3361,20 @@ globalThis.__neoSchemaReady = true;
         const tid = auth.tenantId || 'tenant-default';
         let prevPaid = 0;
         let prevHistRaw = '[]';
+        let prevBranchId = '';
         try {
           const prev = await env.DB.prepare('SELECT paidAmount, customerName, branchId, paymentHistory FROM sales WHERE id = ? AND tenantId = ?').bind(id, tid).first();
           prevPaid = Number(prev?.paidAmount) || 0;
           prevHistRaw = prev?.paymentHistory || '[]';
+          prevBranchId = prev?.branchId || '';
         } catch (_) {
           try {
-            const prev = await env.DB.prepare('SELECT paidAmount FROM sales WHERE id = ?').bind(id).first();
+            const prev = await env.DB.prepare('SELECT paidAmount, branchId FROM sales WHERE id = ?').bind(id).first();
             prevPaid = Number(prev?.paidAmount) || 0;
+            prevBranchId = prev?.branchId || '';
           } catch (__) {}
         }
+        const rcptBranchId = (body.branchId && body.branchId !== 'all' ? body.branchId : '') || prevBranchId || requestBranchId() || (await resolveBranchId(tid, null)) || '';
         const payHistJson = body.paymentHistory != null
           ? (typeof body.paymentHistory === 'string' ? body.paymentHistory : JSON.stringify(body.paymentHistory))
           : prevHistRaw;
@@ -3066,19 +3397,38 @@ globalThis.__neoSchemaReady = true;
             }
           }
         }
+        let updatedCustomerCredit = null;
         try {
           const newPaid = Number(body.paidAmount) || 0;
           const delta = Math.round((newPaid - prevPaid) * 100) / 100;
-          if (delta > 0.009) {
-            await journalCustomerReceipt(auth, { id, customerName: body.customerName }, delta, body.paymentMethod || 'Cash', body.branchId || '', id + '-rcpt-' + newPaid);
-            await appendTenantAuditRecord(tid, auth.user?.name || body.cashier || 'Staff', 'payment', 'sales', `Sale ${id} (${body.customerName || ''}) — Additional payment ${delta} via ${body.paymentMethod || 'Cash'}`);
+          const acctUsed = Math.round(Math.max(0, Number(body.accountCreditUsed) || 0) * 100) / 100;
+          const acctExcess = Math.round(Math.max(0, Number(body.excessCredit) || 0) * 100) / 100;
+          if ((acctUsed > 0 || acctExcess > 0) && (body.customerId || body.customerName)) {
+            try { await env.DB.prepare(`ALTER TABLE customers ADD COLUMN creditBalance REAL DEFAULT 0`).run(); } catch (_) {}
+            let custRow = null;
+            if (body.customerId) {
+              custRow = await env.DB.prepare(`SELECT id, creditBalance FROM customers WHERE id = ? AND tenantId = ? LIMIT 1`).bind(body.customerId, tid).first();
+            }
+            if (!custRow && body.customerName) {
+              custRow = await env.DB.prepare(`SELECT id, creditBalance FROM customers WHERE LOWER(name) = LOWER(?) AND tenantId = ? LIMIT 1`).bind(body.customerName, tid).first();
+            }
+            if (custRow && custRow.id) {
+              const nextBal = Math.round(Math.max(0, (parseFloat(custRow.creditBalance) || 0) - acctUsed + acctExcess) * 100) / 100;
+              await env.DB.prepare(`UPDATE customers SET creditBalance = ? WHERE id = ?`).bind(nextBal, custRow.id).run();
+              updatedCustomerCredit = { customerId: custRow.id, creditBalance: nextBal };
+            }
+          }
+          if (delta > 0.009 || acctExcess > 0.009) {
+            const payMethodUsed = body.lastPaymentMethod || body.paymentMethod || 'Cash';
+            await journalCustomerReceipt(auth, { id, customerName: body.customerName }, Math.max(0, delta), payMethodUsed, rcptBranchId, id + '-rcpt-' + newPaid + '-' + acctExcess, acctExcess);
+            await appendTenantAuditRecord(tid, auth.user?.name || body.cashier || 'Staff', 'payment', 'sales', `Sale ${id} (${body.customerName || ''}) — Payment ${delta}${acctExcess > 0 ? ' + Excess Credit ' + acctExcess : ''} via ${payMethodUsed}`, { branchId: rcptBranchId });
           }
         } catch (_) {}
-        return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
+        return new Response(JSON.stringify({ success: true, customerCredit: updatedCustomerCredit }), { headers: { 'Content-Type': 'application/json' } });
       }
       if (request.method === 'DELETE' && id) {
         const tid = auth.tenantId || 'tenant-default';
-        const delSale = await env.DB.prepare(`SELECT customerName, totalAmount FROM sales WHERE id = ? AND tenantId = ?`).bind(id, tid).first().catch(() => null);
+        const delSale = await env.DB.prepare(`SELECT customerName, totalAmount, branchId FROM sales WHERE id = ? AND tenantId = ?`).bind(id, tid).first().catch(() => null);
         try {
           await env.DB.prepare(`DELETE FROM sales WHERE id = ? AND tenantId = ?`).bind(id, tid).run();
         } catch (_) {
@@ -3086,7 +3436,7 @@ globalThis.__neoSchemaReady = true;
         }
         try {
           await writeSecurityAudit(auth, 'delete', routeType, id);
-          await appendTenantAuditRecord(tid, auth.user?.name || 'Staff', 'delete', 'sales', `Deleted sale ${id}${delSale?.customerName ? ' (' + delSale.customerName + ')' : ''}`);
+          await appendTenantAuditRecord(tid, auth.user?.name || 'Staff', 'delete', 'sales', `Deleted sale ${id}${delSale?.customerName ? ' (' + delSale.customerName + ')' : ''}`, { branchId: delSale?.branchId || requestBranchId() || '' });
         } catch (_) {}
         return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
       }
@@ -3160,11 +3510,35 @@ globalThis.__neoSchemaReady = true;
         tenantId
       ));
 
+      const retBranchId = sale.branchId || ((body.branchId && body.branchId !== 'all') ? body.branchId : '') || requestBranchId() || (await resolveBranchId(tenantId, null)) || '';
+      if (retBranchId && !branchAllowedForAuth(auth, retBranchId)) {
+        return json({ error: 'Not allowed to process sales returns for this location.' }, 403);
+      }
+
       // Restore stock only for Saleable returns
       if (disposition === 'Saleable') {
         for (const it of updatedItems) {
           const ret = it._retThis || 0;
           if (ret <= 0 || !it.id) continue;
+          let invRow = null;
+          try {
+            invRow = await env.DB.prepare('SELECT id, quantity, locationQuantities, allLocations, allowedBranches FROM inventory WHERE id = ? AND tenantId = ?').bind(it.id, tenantId).first();
+          } catch (_) {}
+          if (invRow && retBranchId) {
+            let locQ = {};
+            try { locQ = typeof invRow.locationQuantities === 'string' ? JSON.parse(invRow.locationQuantities || '{}') : (invRow.locationQuantities || {}); } catch (_) { locQ = {}; }
+            if (!locQ || typeof locQ !== 'object' || Array.isArray(locQ)) locQ = {};
+            let allowedBrs = [];
+            try { allowedBrs = typeof invRow.allowedBranches === 'string' ? JSON.parse(invRow.allowedBranches || '[]') : (invRow.allowedBranches || []); } catch (_) { allowedBrs = []; }
+            if (invRow.allLocations === 1 || (Array.isArray(allowedBrs) && allowedBrs.length > 0) || Object.keys(locQ).length > 0) {
+              locQ[retBranchId] = (Number(locQ[retBranchId]) || 0) + ret;
+              const nextQty = (Number(invRow.quantity) || 0) + ret;
+              statements.push(env.DB.prepare(
+                `UPDATE inventory SET quantity = ?, locationQuantities = ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ? AND tenantId = ?`
+              ).bind(nextQty, JSON.stringify(locQ), it.id, tenantId));
+              continue;
+            }
+          }
           statements.push(env.DB.prepare(
             `UPDATE inventory SET quantity = quantity + ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ? AND tenantId = ?`
           ).bind(ret, it.id, tenantId));
@@ -3174,15 +3548,16 @@ globalThis.__neoSchemaReady = true;
       await env.DB.batch(statements);
       try {
         await writeSecurityAudit(auth, 'sales-return', 'sales', saleId + ' refund ' + refundTotal);
-        await appendTenantAuditRecord(tenantId, auth.user?.name || 'Manager', 'sales-return', 'sales', `Sale ${saleId} (${sale.customerName || ''}) — Refund ${refundTotal} via ${method} (${disposition})`);
+        await appendTenantAuditRecord(tenantId, auth.user?.name || 'Manager', 'sales-return', 'sales', `Sale ${saleId} (${sale.customerName || ''}) — Refund ${refundTotal} via ${method} (${disposition})`, { branchId: retBranchId });
       } catch (_) {}
       try {
         let cogsRestore = 0;
         for (const it of updatedItems) {
           const ret = it._retThis || 0;
-          if (ret > 0) cogsRestore += ret * (Number(it.cogs) || 0);
+          if (ret > 0) cogsRestore += ret * (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0);
         }
-        await journalSalesReturn(auth, saleId, refundTotal, method, disposition === 'Saleable' ? cogsRestore : 0, sale.branchId || '');
+        const actualCashRefund = Math.min(refundTotal, Math.max(0, Number(sale.paidAmount) || 0));
+        await journalSalesReturn(auth, saleId, refundTotal, method, disposition === 'Saleable' ? cogsRestore : 0, retBranchId, { refundTax, actualRefund: actualCashRefund });
       } catch (_) {}
 
       const updatedSale = await env.DB.prepare('SELECT * FROM sales WHERE id = ? AND tenantId = ?').bind(saleId, tenantId).first();
@@ -3412,6 +3787,8 @@ globalThis.__neoSchemaReady = true;
       try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN received INTEGER DEFAULT 0').run(); } catch (_) {}
       try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN taxInclusive INTEGER DEFAULT 0').run(); } catch (_) {}
       try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN paymentHistory TEXT').run(); } catch (_) {}
+      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN receivedQty INTEGER DEFAULT 0').run(); } catch (_) {}
+      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN receiveHistory TEXT').run(); } catch (_) {}
       if (request.method === 'POST') {
         const body = await request.json();
         const tidPo = auth.tenantId || 'tenant-default';
@@ -3428,7 +3805,7 @@ globalThis.__neoSchemaReady = true;
           ).run();
           try {
             const itemsJson = typeof body.items === 'string' ? body.items : JSON.stringify(body.items || []);
-            await env.DB.prepare(`UPDATE purchase_orders SET items = ?, groupId = ? WHERE id = ? AND tenantId = ?`).bind(itemsJson, body.groupId || '', body.id, tidPo).run();
+            await env.DB.prepare(`UPDATE purchase_orders SET items = ?, groupId = ?, receivedQty = ?, receiveHistory = ? WHERE id = ? AND tenantId = ?`).bind(itemsJson, body.groupId || '', Number(body.receivedQty) || 0, JSON.stringify(body.receiveHistory || []), body.id, tidPo).run();
           } catch (_) {}
         } catch (_) {
           await env.DB.prepare(
@@ -3442,7 +3819,7 @@ globalThis.__neoSchemaReady = true;
       if (request.method === 'PUT' && id) {
         const body = await request.json();
         const tidPo = auth.tenantId || 'tenant-default';
-        const existingPo = await env.DB.prepare('SELECT workflowStatus, paidAmount, amount, supplierName, paymentHistory FROM purchase_orders WHERE id = ? AND tenantId = ?').bind(id, tidPo).first().catch(() => null);
+        const existingPo = await env.DB.prepare('SELECT workflowStatus, paidAmount, amount, supplierName, paymentHistory, branchId, received, receivedQty, receiveHistory FROM purchase_orders WHERE id = ? AND tenantId = ?').bind(id, tidPo).first().catch(() => null);
         // Enforce Purchase Approval Limit when moving from Draft -> Approved
         if (existingPo && existingPo.workflowStatus === 'Draft' && body.workflowStatus === 'Approved') {
           try {
@@ -3455,12 +3832,25 @@ globalThis.__neoSchemaReady = true;
             }
           } catch (_) {}
         }
+        const poBranchId = (body.branchId && body.branchId !== 'all' ? body.branchId : '') || existingPo?.branchId || requestBranchId() || (await resolveBranchId(tidPo, null)) || '';
+        const nextReceivedFlag = body.received != null ? (body.received ? 1 : 0) : (existingPo?.received ? 1 : 0);
+        let nextWorkflowStatus = body.workflowStatus || 'Draft';
+        if (existingPo && !nextReceivedFlag && (Number(existingPo.receivedQty) || 0) > 0 && nextWorkflowStatus === 'Payment') {
+          nextWorkflowStatus = 'Partially Received';
+        }
+        const nextReceivedQty = body.receivedQty != null ? (Number(body.receivedQty) || 0) : (Number(existingPo?.receivedQty) || 0);
+        const nextReceiveHistory = body.receiveHistory != null
+          ? (typeof body.receiveHistory === 'string' ? body.receiveHistory : JSON.stringify(body.receiveHistory))
+          : (existingPo?.receiveHistory || '[]');
         const histRaw = body.paymentHistory != null ? (typeof body.paymentHistory === 'string' ? body.paymentHistory : JSON.stringify(body.paymentHistory)) : (existingPo?.paymentHistory || '[]');
         await env.DB.prepare(
           `UPDATE purchase_orders SET date = ?, supplierId = ?, supplierName = ?, itemId = ?, itemName = ?, quantity = ?, cost = ?, amount = ?, paidAmount = ?, balanceDue = ?, paymentMethod = ?, paymentStatus = ?, workflowStatus = ?, deadline = ?, taxAmount = ?, taxRate = ?, returnedQty = ?, returnHistory = ?, createdBy = ?, cogsBooked = ?, received = ?, taxInclusive = ?, paymentHistory = ? WHERE id = ? AND tenantId = ?`
         ).bind(
-          body.date, body.supplierId || '', body.supplierName, body.itemId || '', body.itemName, body.quantity || 1, body.cost || 0, body.amount || 0, body.paidAmount || 0, body.balanceDue || 0, body.paymentMethod || 'Cash', body.paymentStatus || 'Unpaid', body.workflowStatus || 'Draft', body.deadline || '', body.taxAmount || 0, body.taxRate || 0, body.returnedQty || 0, JSON.stringify(body.returnHistory || []), body.createdBy || '', body.cogsBooked || 0, body.received ? 1 : 0, body.taxInclusive ? 1 : 0, histRaw, id, tidPo
+          body.date, body.supplierId || '', body.supplierName, body.itemId || '', body.itemName, body.quantity || 1, body.cost || 0, body.amount || 0, body.paidAmount || 0, body.balanceDue || 0, body.paymentMethod || 'Cash', body.paymentStatus || 'Unpaid', nextWorkflowStatus, body.deadline || '', body.taxAmount || 0, body.taxRate || 0, body.returnedQty || 0, JSON.stringify(body.returnHistory || []), body.createdBy || '', body.cogsBooked || 0, nextReceivedFlag, body.taxInclusive ? 1 : 0, histRaw, id, tidPo
         ).run();
+        try {
+          await env.DB.prepare(`UPDATE purchase_orders SET receivedQty = ?, receiveHistory = ? WHERE id = ? AND tenantId = ?`).bind(nextReceivedQty, nextReceiveHistory, id, tidPo).run();
+        } catch (_) {}
         try {
           if (body.items != null) {
             const itemsJson = typeof body.items === 'string' ? body.items : JSON.stringify(body.items || []);
@@ -3476,8 +3866,8 @@ globalThis.__neoSchemaReady = true;
             const last = histArr[histArr.length - 1];
             const payAmt = Number(last.amount || last.payAmount || deltaPoPay) || 0;
             if (payAmt > 0) {
-              await journalPurchasePayment(auth, { id, supplierName: body.supplierName }, payAmt, last.paymentMethod || last.method || body.paymentMethod, body.branchId || '', id + '-pay-' + histArr.length + '-' + payAmt);
-              await appendTenantAuditRecord(tidPo, auth.user?.name || 'Staff', 'payment', 'purchase_orders', `PO ${id} (${body.supplierName || ''}) — Paid ${payAmt} via ${last.paymentMethod || last.method || body.paymentMethod || 'Cash'}`);
+              await journalPurchasePayment(auth, { id, supplierName: body.supplierName, branchId: poBranchId }, payAmt, last.paymentMethod || last.method || body.paymentMethod, poBranchId, id + '-pay-' + histArr.length + '-' + payAmt);
+              await appendTenantAuditRecord(tidPo, auth.user?.name || 'Staff', 'payment', 'purchase_orders', `PO ${id} (${body.supplierName || ''}) — Paid ${payAmt} via ${last.paymentMethod || last.method || body.paymentMethod || 'Cash'}`, { branchId: poBranchId });
             }
           }
         } catch (_) {}
@@ -3489,10 +3879,12 @@ globalThis.__neoSchemaReady = true;
         let groupId = null;
         let idsToClear = [id];
         let delSupplier = '';
+        let delPoBranch = '';
         try {
-          const row = await env.DB.prepare('SELECT groupId, supplierName FROM purchase_orders WHERE id = ? AND tenantId = ?').bind(id, tid).first();
+          const row = await env.DB.prepare('SELECT groupId, supplierName, branchId FROM purchase_orders WHERE id = ? AND tenantId = ?').bind(id, tid).first();
           groupId = row && row.groupId ? String(row.groupId) : null;
           delSupplier = row?.supplierName || '';
+          delPoBranch = row?.branchId || '';
           if (groupId) {
             const sibs = (await env.DB.prepare('SELECT id FROM purchase_orders WHERE tenantId = ? AND groupId = ?').bind(tid, groupId).all()).results || [];
             idsToClear = sibs.map(s => s.id);
@@ -3515,7 +3907,7 @@ globalThis.__neoSchemaReady = true;
         }
         try {
           await writeSecurityAudit(auth, 'delete', routeType, id + (groupId ? ' group:' + groupId : ''));
-          await appendTenantAuditRecord(tid, auth.user?.name || 'Staff', 'delete', 'purchase_orders', `Deleted PO ${id}${delSupplier ? ' (' + delSupplier + ')' : ''}`);
+          await appendTenantAuditRecord(tid, auth.user?.name || 'Staff', 'delete', 'purchase_orders', `Deleted PO ${id}${delSupplier ? ' (' + delSupplier + ')' : ''}`, { branchId: delPoBranch || requestBranchId() || '' });
         } catch (_) {}
         return new Response(JSON.stringify({ success: true, deletedGroupId: groupId || null }), { headers: { 'Content-Type': 'application/json' } });
       }
@@ -3531,13 +3923,43 @@ globalThis.__neoSchemaReady = true;
       if (!fromId || !toBranchId || qty <= 0) return json({ error: 'fromItemId, toBranchId and qty required' }, 400);
       const fromItem = await env.DB.prepare('SELECT * FROM inventory WHERE id = ? AND tenantId = ?').bind(fromId, tenantId).first();
       if (!fromItem) return json({ error: 'Source item not found' }, 404);
-      if (!branchAllowedForAuth(auth, fromItem.branchId) || !branchAllowedForAuth(auth, toBranchId)) {
-        return json({ error: 'Not allowed to transfer for one of these locations.' }, 403);
-      }
-      if ((Number(fromItem.quantity) || 0) < qty) return json({ error: 'Insufficient stock at source location.' }, 409);
+      const fromBranchId = body.fromBranchId || fromItem.branchId || requestBranchId() || '';
       const branches = await listBranches(tenantId);
       if (!branches.some(b => b.id === toBranchId)) return json({ error: 'Destination location not found' }, 404);
-      // Prefer matching item at destination by name+sku within same tenant
+      if (!branchAllowedForAuth(auth, toBranchId) || (fromBranchId && !branchAllowedForAuth(auth, fromBranchId))) {
+        return json({ error: 'Not allowed to transfer for one of these locations.' }, 403);
+      }
+
+      let locQ = {};
+      try { locQ = typeof fromItem.locationQuantities === 'string' ? JSON.parse(fromItem.locationQuantities || '{}') : (fromItem.locationQuantities || {}); } catch (_) { locQ = {}; }
+      if (!locQ || typeof locQ !== 'object' || Array.isArray(locQ)) locQ = {};
+      let allowedBrs = [];
+      try { allowedBrs = typeof fromItem.allowedBranches === 'string' ? JSON.parse(fromItem.allowedBranches || '[]') : (fromItem.allowedBranches || []); } catch (_) { allowedBrs = []; }
+      const isSharedItem = Boolean(fromItem.allLocations === 1 || (Array.isArray(allowedBrs) && allowedBrs.length > 0) || Object.keys(locQ).length > 0);
+
+      if (isSharedItem && fromBranchId) {
+        const avail = Object.keys(locQ).length > 0
+          ? (Number(locQ[fromBranchId]) || 0)
+          : (Number(fromItem.quantity) || 0);
+        if (avail < qty) return json({ error: 'Insufficient stock at source location.' }, 409);
+        const nextLocQ = { ...locQ };
+        nextLocQ[fromBranchId] = avail - qty;
+        nextLocQ[toBranchId] = (Number(nextLocQ[toBranchId]) || 0) + qty;
+        const nextTotalQty = Object.values(nextLocQ).reduce((s, v) => s + Math.max(0, Number(v) || 0), 0);
+        let nextAllowedBrs = Array.isArray(allowedBrs) ? [...allowedBrs] : [];
+        if (fromItem.allLocations !== 1 && nextAllowedBrs.length > 0 && !nextAllowedBrs.includes(toBranchId)) {
+          nextAllowedBrs.push(toBranchId);
+        }
+        await env.DB.prepare(
+          `UPDATE inventory SET quantity = ?, locationQuantities = ?, allowedBranches = ?, status = CASE WHEN ? > 0 AND status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ? AND tenantId = ?`
+        ).bind(nextTotalQty, JSON.stringify(nextLocQ), JSON.stringify(nextAllowedBrs), nextTotalQty, fromId, tenantId).run();
+        try { await writeSecurityAudit(auth, 'transfer', 'inventory', fromId + ' (' + fromBranchId + ' -> ' + toBranchId + ') x' + qty); } catch (_) {}
+        const updatedFrom = await env.DB.prepare('SELECT * FROM inventory WHERE id = ? AND tenantId = ?').bind(fromId, tenantId).first();
+        return json({ success: true, from: updatedFrom, to: updatedFrom, qty });
+      }
+
+      if ((Number(fromItem.quantity) || 0) < qty) return json({ error: 'Insufficient stock at source location.' }, 409);
+      // Prefer matching item at destination by name within same tenant
       let toItem = null;
       try {
         toItem = await env.DB.prepare(
@@ -3555,11 +3977,11 @@ globalThis.__neoSchemaReady = true;
       } else {
         const newId = 'item-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
         statements.push(env.DB.prepare(
-          `INSERT INTO inventory (id, name, category, buyingPrice, price, quantity, lowStockAlert, trackInventory, status, photoUrl, tenantId, sku, size, colour, wholesalePrice, branchId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO inventory (id, name, category, buyingPrice, price, quantity, lowStockAlert, trackInventory, status, photoUrl, tenantId, sku, size, colour, wholesalePrice, branchId, varianceValues) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           newId, fromItem.name, fromItem.category, fromItem.buyingPrice || 0, fromItem.price || 0, qty,
           fromItem.lowStockAlert || 3, fromItem.trackInventory ? 1 : 0, 'Listed', fromItem.photoUrl || '',
-          tenantId, fromItem.sku || '', fromItem.size || '', fromItem.colour || '', fromItem.wholesalePrice || 0, toBranchId
+          tenantId, fromItem.sku || '', fromItem.size || '', fromItem.colour || '', fromItem.wholesalePrice || 0, toBranchId, fromItem.varianceValues || '{}'
         ));
         toItem = { id: newId, name: fromItem.name, branchId: toBranchId };
       }
@@ -3570,39 +3992,76 @@ globalThis.__neoSchemaReady = true;
       return json({ success: true, from: updatedFrom, to: updatedTo, qty });
     }
 
-    // Purchase receipt: stock and PO status are committed together to avoid a received PO with no stock update.
+    // Purchase receipt: supports full or partial line-by-line receiving; stock and PO status are committed together.
     if (routeType === 'purchase-receive' && request.method === 'POST') {
       const body = await request.json();
       const tenantId = auth.tenantId || 'tenant-default';
+      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN receivedQty INTEGER DEFAULT 0').run(); } catch (_) {}
+      try { await env.DB.prepare('ALTER TABLE purchase_orders ADD COLUMN receiveHistory TEXT').run(); } catch (_) {}
       const po = await env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ? AND tenantId = ?').bind(body.poId, tenantId).first();
       if (!po) return json({ error: 'Purchase order not found for this shop.' }, 404);
-      if (po.received || ['Received', 'Payment', 'Purchase Return'].includes(po.workflowStatus)) return json({ error: 'This purchase order has already been received.' }, 409);
-      if (po.workflowStatus !== 'Approved') return json({ error: 'Only an approved purchase order can be received.' }, 409);
+      if (po.received || ['Received', 'Purchase Return'].includes(po.workflowStatus)) return json({ error: 'This purchase order has already been fully received.' }, 409);
+      if (!['Approved', 'Partially Received'].includes(po.workflowStatus) && !(po.workflowStatus === 'Payment' && !po.received)) {
+        return json({ error: 'Only an approved or partially received purchase order can be received.' }, 409);
+      }
+      const recBranchId = (po.branchId && po.branchId !== 'all' ? po.branchId : '') || (body.branchId && body.branchId !== 'all' ? body.branchId : '') || requestBranchId() || (await resolveBranchId(tenantId, null)) || '';
+      if (recBranchId && !branchAllowedForAuth(auth, recBranchId)) {
+        return json({ error: 'Not allowed to receive purchase orders for this location.' }, 403);
+      }
 
       let lineItems = [];
       try {
         if (po.items) lineItems = typeof po.items === 'string' ? JSON.parse(po.items) : (po.items || []);
       } catch (_) { lineItems = []; }
       if (!Array.isArray(lineItems) || !lineItems.length) {
-        lineItems = [{ itemId: po.itemId, itemName: po.itemName, quantity: po.quantity, returnedQty: po.returnedQty || 0 }];
+        lineItems = [{ itemId: po.itemId, itemName: po.itemName, quantity: po.quantity, cost: po.cost, returnedQty: po.returnedQty || 0, receivedQty: po.receivedQty || 0 }];
       }
 
+      const inLines = Array.isArray(body.receiveLines) && body.receiveLines.length ? body.receiveLines : null;
       const stmts = [];
-      let totalReceived = 0;
+      let totalReceivedNow = 0;
+      let totalOrderedNet = 0;
+      let totalReceivedAfter = 0;
+      let batchSubtotal = 0;
+      let orderSubtotal = 0;
       let lastItemId = po.itemId;
-      for (const line of lineItems) {
-        const receiveQty = Math.max(0, (Number(line.quantity) || 0) - (Number(line.returnedQty) || 0));
+      const updatedLineItems = [];
+      const batchLineLogs = [];
+
+      for (let idx = 0; idx < lineItems.length; idx++) {
+        const line = lineItems[idx];
+        const orderedNet = Math.max(0, (Number(line.quantity) || 0) - (Number(line.returnedQty) || 0));
+        const prevRec = Math.max(0, Number(line.receivedQty) || (lineItems.length === 1 && !po.items ? (Number(po.receivedQty) || 0) : 0));
+        const remaining = Math.max(0, orderedNet - prevRec);
+        const lineCost = Number(line.cost != null ? line.cost : po.cost) || 0;
+        orderSubtotal += orderedNet * lineCost;
+        totalOrderedNet += orderedNet;
+
+        let wantQty = remaining;
+        if (inLines) {
+          const hit = inLines.find(rl =>
+            (rl.index != null && Number(rl.index) === idx) ||
+            (rl.itemId && line.itemId && String(rl.itemId) === String(line.itemId)) ||
+            (rl.itemName && line.itemName && String(rl.itemName).toLowerCase() === String(line.itemName).toLowerCase())
+          );
+          wantQty = hit ? Math.max(0, parseInt(hit.qty ?? hit.receiveQty, 10) || 0) : 0;
+        }
+        const receiveQty = Math.min(remaining, wantQty);
+        const nextLineRec = prevRec + receiveQty;
+        totalReceivedAfter += nextLineRec;
+        updatedLineItems.push({ ...line, receivedQty: nextLineRec });
+
         if (receiveQty <= 0) continue;
+
         let item = null;
         if (line.itemId) {
           item = await env.DB.prepare('SELECT * FROM inventory WHERE id = ? AND tenantId = ?').bind(line.itemId, tenantId).first();
         }
         if (!item && line.itemName) {
-          const br = po.branchId || (await resolveBranchId(tenantId, requestBranchId()));
           try {
             item = await env.DB.prepare(
               `SELECT * FROM inventory WHERE tenantId = ? AND LOWER(name) = LOWER(?) AND (branchId = ? OR branchId IS NULL OR branchId = '') LIMIT 1`
-            ).bind(tenantId, line.itemName, br).first();
+            ).bind(tenantId, line.itemName, recBranchId).first();
           } catch (_) {
             try {
               item = await env.DB.prepare(
@@ -3612,16 +4071,65 @@ globalThis.__neoSchemaReady = true;
           }
         }
         if (!item) return json({ error: `Inventory item ${line.itemName || line.itemId} was not found. Create/link the inventory item before receiving.` }, 409);
-        stmts.push(env.DB.prepare(`UPDATE inventory SET quantity = quantity + ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ? AND tenantId = ?`).bind(receiveQty, item.id, tenantId));
-        totalReceived += receiveQty;
+
+        let locQ = {};
+        try { locQ = typeof item.locationQuantities === 'string' ? JSON.parse(item.locationQuantities || '{}') : (item.locationQuantities || {}); } catch (_) { locQ = {}; }
+        if (!locQ || typeof locQ !== 'object' || Array.isArray(locQ)) locQ = {};
+        let allowedBrs = [];
+        try { allowedBrs = typeof item.allowedBranches === 'string' ? JSON.parse(item.allowedBranches || '[]') : (item.allowedBranches || []); } catch (_) { allowedBrs = []; }
+        const usesLocMap = Boolean(recBranchId && (item.allLocations === 1 || item.allLocations === true || (Array.isArray(allowedBrs) && allowedBrs.length > 0) || Object.keys(locQ).length > 0));
+        if (!usesLocMap && recBranchId && item.branchId && String(item.branchId) !== String(recBranchId)) {
+          return json({ error: `Inventory item ${line.itemName || item.name || item.id} belongs to another location.` }, 409);
+        }
+        if (usesLocMap) {
+          locQ[recBranchId] = (Number(locQ[recBranchId]) || 0) + receiveQty;
+          const nextQty = Object.keys(locQ).length > 0
+            ? Object.values(locQ).reduce((s, v) => s + Math.max(0, Number(v) || 0), 0)
+            : (Number(item.quantity) || 0) + receiveQty;
+          stmts.push(env.DB.prepare(`UPDATE inventory SET quantity = ?, locationQuantities = ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ? AND tenantId = ?`).bind(nextQty, JSON.stringify(locQ), item.id, tenantId));
+        } else {
+          stmts.push(env.DB.prepare(`UPDATE inventory SET quantity = quantity + ?, status = CASE WHEN status = 'Sold' THEN 'Listed' ELSE status END WHERE id = ? AND tenantId = ?`).bind(receiveQty, item.id, tenantId));
+        }
+        totalReceivedNow += receiveQty;
+        batchSubtotal += receiveQty * lineCost;
         lastItemId = item.id;
+        batchLineLogs.push({ itemId: item.id, itemName: line.itemName || item.name, qty: receiveQty });
       }
-      if (totalReceived <= 0) return json({ error: 'There is no quantity left to receive on this purchase order.' }, 409);
-      stmts.push(env.DB.prepare(`UPDATE purchase_orders SET workflowStatus = 'Received', received = 1, itemId = ? WHERE id = ? AND tenantId = ? AND workflowStatus = 'Approved' AND (received IS NULL OR received = 0)`).bind(lastItemId, body.poId, tenantId));
+      if (totalReceivedNow <= 0) return json({ error: 'Enter at least one quantity left to receive on this purchase order.' }, 409);
+
+      const allReceived = totalOrderedNet > 0 ? totalReceivedAfter >= totalOrderedNet : true;
+      const nextStatus = allReceived ? 'Received' : 'Partially Received';
+      const nextReceivedFlag = allReceived ? 1 : 0;
+      let prevHist = [];
+      try { prevHist = typeof po.receiveHistory === 'string' ? JSON.parse(po.receiveHistory || '[]') : (po.receiveHistory || []); } catch (_) { prevHist = []; }
+      if (!Array.isArray(prevHist)) prevHist = [];
+      const nextHist = [...prevHist, {
+        id: `rcv-${Date.now()}`,
+        date: new Date().toISOString(),
+        receivedBy: auth.user?.name || 'Staff',
+        branchId: recBranchId,
+        qty: totalReceivedNow,
+        lines: batchLineLogs
+      }];
+
+      stmts.push(
+        env.DB.prepare(
+          `UPDATE purchase_orders SET workflowStatus = ?, received = ?, receivedQty = ?, receiveHistory = ?, items = ?, itemId = ? WHERE id = ? AND tenantId = ?`
+        ).bind(nextStatus, nextReceivedFlag, totalReceivedAfter, JSON.stringify(nextHist), JSON.stringify(updatedLineItems), lastItemId, body.poId, tenantId)
+      );
       await env.DB.batch(stmts);
       const updatedPO = await env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ? AND tenantId = ?').bind(body.poId, tenantId).first();
-      try { await journalPurchaseReceive(auth, updatedPO || po, body.branchId || ''); } catch (_) {}
-      return json({ success: true, purchaseOrder: updatedPO, receivedQty: totalReceived });
+      const poAmountTotal = Number(po.amount) || 0;
+      const batchValue = orderSubtotal > 0
+        ? Math.round(((batchSubtotal / orderSubtotal) * poAmountTotal) * 100) / 100
+        : Math.round(((totalReceivedNow / Math.max(1, totalOrderedNet)) * poAmountTotal) * 100) / 100;
+      try {
+        await journalPurchaseReceive(auth, { ...(updatedPO || po), amount: batchValue > 0 ? batchValue : poAmountTotal }, recBranchId, `${po.id}-rcv-${nextHist.length}-${totalReceivedNow}`);
+      } catch (_) {}
+      try {
+        await appendTenantAuditRecord(tenantId, auth.user?.name || 'Staff', 'po-receive', 'purchase_orders', `PO ${po.id} (${po.supplierName || ''}) — Received ${totalReceivedNow} unit(s) [${nextStatus}]`, { branchId: recBranchId });
+      } catch (_) {}
+      return json({ success: true, purchaseOrder: updatedPO, receivedQty: totalReceivedNow, totalReceived: totalReceivedAfter, workflowStatus: nextStatus });
     }
 
     // Purchase return: update PO + reduce stock (if received) in one batch — same business rules as UI
@@ -3633,8 +4141,13 @@ globalThis.__neoSchemaReady = true;
       const po = await env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ? AND tenantId = ?').bind(poId, tenantId).first();
       if (!po) return json({ error: 'Purchase order not found for this shop.' }, 404);
 
-      const wasReceived = !!(po.received || ['Received', 'Payment', 'Purchase Return'].includes(po.workflowStatus));
-      if (!wasReceived) return json({ error: 'A purchase return can only be created after the goods have been received.' }, 409);
+      const wasReceived = !!(po.received || (Number(po.receivedQty) || 0) > 0 || ['Received', 'Partially Received', 'Payment', 'Purchase Return'].includes(po.workflowStatus));
+      if (!wasReceived) return json({ error: 'A purchase return can only be created after goods have been received.' }, 409);
+
+      const retBranchId = (po.branchId && po.branchId !== 'all' ? po.branchId : '') || (body.branchId && body.branchId !== 'all' ? body.branchId : '') || requestBranchId() || (await resolveBranchId(tenantId, null)) || '';
+      if (retBranchId && !branchAllowedForAuth(auth, retBranchId)) {
+        return json({ error: 'Not allowed to process purchase returns for this location.' }, 403);
+      }
 
       // Support multi-item returnLines: [{ itemId, itemName, qty, cost }]
       let poItems = [];
@@ -3643,7 +4156,7 @@ globalThis.__neoSchemaReady = true;
         if (!Array.isArray(poItems)) poItems = [];
       } catch (_) { poItems = []; }
       if (!poItems.length && (po.itemId || po.itemName)) {
-        poItems = [{ itemId: po.itemId, itemName: po.itemName, quantity: po.quantity, cost: po.cost, returnedQty: po.returnedQty || 0 }];
+        poItems = [{ itemId: po.itemId, itemName: po.itemName, quantity: po.quantity, cost: po.cost, returnedQty: po.returnedQty || 0, receivedQty: po.receivedQty || 0 }];
       }
 
       const returnLinesIn = Array.isArray(body.returnLines) ? body.returnLines : null;
@@ -3653,15 +4166,17 @@ globalThis.__neoSchemaReady = true;
           const qty = Math.max(0, parseInt(rl.qty ?? rl.returnQty, 10) || 0);
           if (qty <= 0) continue;
           const match = poItems.find(it => String(it.itemId || '') === String(rl.itemId || '') || String(it.itemName || '') === String(rl.itemName || ''))
-            || { itemId: rl.itemId, itemName: rl.itemName, quantity: rl.quantity || qty, cost: rl.cost || 0, returnedQty: rl.returnedQty || 0 };
+            || { itemId: rl.itemId, itemName: rl.itemName, quantity: rl.quantity || qty, cost: rl.cost || 0, returnedQty: rl.returnedQty || 0, receivedQty: rl.receivedQty || 0 };
           const alreadyLine = Number(match.returnedQty) || 0;
-          const maxLine = Math.max(0, (Number(match.quantity) || 0) - alreadyLine);
-          const ret = Math.min(qty, maxLine);
-          if (ret <= 0) continue;
+          const recCap = (Number(match.receivedQty) || 0) > 0 ? Number(match.receivedQty) : (po.received ? (Number(match.quantity) || 0) : (Number(po.receivedQty) || Number(match.quantity) || 0));
+          const maxLine = Math.max(0, recCap - alreadyLine);
+          if (qty > maxLine) {
+            return json({ error: `Cannot return ${qty} of ${match.itemName || rl.itemName}. Only ${maxLine} received unit(s) available to return.` }, 409);
+          }
           lineReturns.push({
             itemId: match.itemId || rl.itemId || po.itemId,
             itemName: match.itemName || rl.itemName || po.itemName,
-            qty: ret,
+            qty,
             cost: Number(match.cost != null ? match.cost : rl.cost) || Number(po.cost) || 0,
             already: alreadyLine,
             max: maxLine
@@ -3669,14 +4184,16 @@ globalThis.__neoSchemaReady = true;
         }
       } else {
         const already = Number(po.returnedQty) || 0;
-        const maxRet = Math.max(0, (Number(po.quantity) || 0) - already);
+        const recCap = (Number(po.receivedQty) || 0) > 0 ? Number(po.receivedQty) : (Number(po.quantity) || 0);
+        const maxRet = Math.max(0, recCap - already);
         const requestedRet = Math.max(0, parseInt(body.returnQty ?? body.qty, 10) || 0);
-        if (maxRet <= 0) return json({ error: 'No remaining quantity to return on this PO.' }, 400);
+        if (maxRet <= 0) return json({ error: 'No remaining received quantity to return on this PO.' }, 400);
         if (requestedRet <= 0) return json({ error: 'Enter a valid return quantity.' }, 400);
+        if (requestedRet > maxRet) return json({ error: `Cannot return ${requestedRet} units. Only ${maxRet} received unit(s) left to return.` }, 409);
         lineReturns.push({
           itemId: po.itemId,
           itemName: po.itemName,
-          qty: Math.min(requestedRet, maxRet),
+          qty: requestedRet,
           cost: Number(po.cost) || 0,
           already,
           max: maxRet
@@ -3684,14 +4201,24 @@ globalThis.__neoSchemaReady = true;
       }
       if (!lineReturns.length) return json({ error: 'No valid return quantities selected.' }, 400);
 
-      // Stock checks per line
+      // Stock checks per line (branch-aware)
+      const stockSnapshots = [];
       for (const lr of lineReturns) {
         if (!lr.itemId) continue;
-        let stockRow = await env.DB.prepare("SELECT * FROM inventory WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '')").bind(lr.itemId, tenantId).first();
-        const available = Math.max(0, Number(stockRow?.quantity) || 0);
+        const stockRow = await env.DB.prepare("SELECT * FROM inventory WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '')").bind(lr.itemId, tenantId).first();
+        let locQ = {};
+        try { locQ = typeof stockRow?.locationQuantities === 'string' ? JSON.parse(stockRow.locationQuantities || '{}') : (stockRow?.locationQuantities || {}); } catch (_) { locQ = {}; }
+        if (!locQ || typeof locQ !== 'object' || Array.isArray(locQ)) locQ = {};
+        let allowedBrs = [];
+        try { allowedBrs = typeof stockRow?.allowedBranches === 'string' ? JSON.parse(stockRow.allowedBranches || '[]') : (stockRow?.allowedBranches || []); } catch (_) { allowedBrs = []; }
+        const usesLocMap = Boolean(retBranchId && stockRow && (stockRow.allLocations === 1 || stockRow.allLocations === true || (Array.isArray(allowedBrs) && allowedBrs.length > 0) || Object.keys(locQ).length > 0));
+        const available = usesLocMap
+          ? Math.max(0, Number(locQ[retBranchId]) || 0)
+          : Math.max(0, Number(stockRow?.quantity) || 0);
         if (lr.qty > available) {
-          return json({ error: `Cannot return ${lr.qty} of ${lr.itemName || lr.itemId}. Only ${available} in stock.` }, 409);
+          return json({ error: `Cannot return ${lr.qty} of ${lr.itemName || lr.itemId}. Only ${available} in stock at this location.` }, 409);
         }
+        stockSnapshots.push({ lr, stockRow, usesLocMap, locQ });
       }
 
       const taxInclusive = !!(po.taxInclusive);
@@ -3706,7 +4233,6 @@ globalThis.__neoSchemaReady = true;
       }
       returnValue = Math.round(returnValue * 100) / 100;
       const already = Number(po.returnedQty) || 0;
-
 
       const newReturned = already + retQty;
       const newAmount = Math.max(0, (Number(po.amount) || 0) - returnValue);
@@ -3724,7 +4250,7 @@ globalThis.__neoSchemaReady = true;
 
       const fullyReturned = newReturned >= (Number(po.quantity) || 0);
       if (fullyReturned) newBalance = 0;
-      const workflowStatus = fullyReturned ? 'Purchase Return' : (po.workflowStatus || 'Received');
+      const workflowStatus = fullyReturned ? 'Purchase Return' : (po.workflowStatus || (po.received ? 'Received' : 'Partially Received'));
       const paymentStatus = newBalance <= 0 ? (newPaid > 0 ? 'Paid' : 'Unpaid') : (newPaid > 0 ? 'Partial' : 'Unpaid');
 
       let returnHistory = [];
@@ -3757,12 +4283,21 @@ globalThis.__neoSchemaReady = true;
           tenantId
         ),
       ];
-      // Per-line inventory decrements
-      for (const lr of lineReturns) {
-        if (!lr.itemId || !lr.qty) continue;
-        statements.push(env.DB.prepare(
-          `UPDATE inventory SET quantity = quantity - ? WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') AND quantity >= ?`
-        ).bind(lr.qty, lr.itemId, tenantId, lr.qty));
+      // Per-line inventory decrements (shared vs branch-specific)
+      for (const snap of stockSnapshots) {
+        const { lr, stockRow, usesLocMap, locQ } = snap;
+        if (!lr.itemId || !lr.qty || !stockRow) continue;
+        if (usesLocMap && retBranchId) {
+          const nextLocQ = { ...locQ, [retBranchId]: Math.max(0, (Number(locQ[retBranchId]) || 0) - lr.qty) };
+          const nextTotalQty = Object.values(nextLocQ).reduce((s, v) => s + Math.max(0, Number(v) || 0), 0);
+          statements.push(env.DB.prepare(
+            `UPDATE inventory SET quantity = ?, locationQuantities = ? WHERE id = ? AND tenantId = ?`
+          ).bind(nextTotalQty, JSON.stringify(nextLocQ), lr.itemId, tenantId));
+        } else {
+          statements.push(env.DB.prepare(
+            `UPDATE inventory SET quantity = quantity - ? WHERE id = ? AND (tenantId = ? OR tenantId IS NULL OR tenantId = '') AND quantity >= ?`
+          ).bind(lr.qty, lr.itemId, tenantId, lr.qty));
+        }
       }
       // Update items JSON returned quantities
       try {
@@ -3780,10 +4315,10 @@ globalThis.__neoSchemaReady = true;
       await env.DB.batch(statements);
       try {
         await writeSecurityAudit(auth, 'purchase-return', 'purchase_orders', poId + ' qty ' + retQty);
-        await appendTenantAuditRecord(tenantId, auth.user?.name || 'Manager', 'purchase-return', 'purchase_orders', `PO ${poId} (${po.supplierName || ''}) — Returned ${retQty} unit(s), value ${returnValue} (${settlement})`);
+        await appendTenantAuditRecord(tenantId, auth.user?.name || 'Manager', 'purchase-return', 'purchase_orders', `PO ${poId} (${po.supplierName || ''}) — Returned ${retQty} unit(s), value ${returnValue} (${settlement})`, { branchId: retBranchId });
       } catch (_) {}
       try {
-        await journalPurchaseReturn(auth, po, returnValue, cashRefund, supplierCredit, payMethod, po.branchId || '', poId + '-ret-' + newReturned + '-' + returnValue);
+        await journalPurchaseReturn(auth, { ...po, branchId: retBranchId }, returnValue, cashRefund, supplierCredit, payMethod, retBranchId, poId + '-ret-' + newReturned + '-' + returnValue);
       } catch (_) {}
 
       const updatedPO = await env.DB.prepare('SELECT * FROM purchase_orders WHERE id = ? AND tenantId = ?').bind(poId, tenantId).first();
@@ -4474,7 +5009,20 @@ globalThis.__neoSchemaReady = true;
         return json({ accounts });
       }
       if (request.method === 'GET' && (routeType === 'ledger-journals' || sub === 'journals' || pathParts[2] === 'journals')) {
-        const journals = (await env.DB.prepare(`SELECT * FROM journals WHERE tenantId = ? ORDER BY createdAt DESC LIMIT 200`).bind(tid).all()).results || [];
+        const urlJ = new URL(request.url);
+        const reqBrJ = (urlJ.searchParams.get('branchId') || requestBranchId() || '').trim();
+        if (reqBrJ === 'all') {
+          return json({ error: 'Consolidated all-branches journal listing is disabled. Select a specific location.' }, 400);
+        }
+        const effectiveBrJ = reqBrJ || (await resolveBranchId(tid, null)) || '';
+        if (effectiveBrJ && !branchAllowedForAuth(auth, effectiveBrJ)) {
+          return deny('Not allowed to view ledger journals for this location.');
+        }
+        let jSql = `SELECT * FROM journals WHERE tenantId = ?`;
+        const jBinds = [tid];
+        if (effectiveBrJ) { jSql += ` AND branchId = ?`; jBinds.push(effectiveBrJ); }
+        jSql += ` ORDER BY createdAt DESC LIMIT 200`;
+        const journals = (await env.DB.prepare(jSql).bind(...jBinds).all()).results || [];
         const lines = (await env.DB.prepare(`SELECT * FROM journal_lines WHERE tenantId = ?`).bind(tid).all()).results || [];
         const byJ = {};
         for (const l of lines) {
@@ -4484,14 +5032,24 @@ globalThis.__neoSchemaReady = true;
         return json({ journals: journals.map(j => ({ ...j, lines: byJ[j.id] || [] })) });
       }
       if (request.method === 'GET' && (routeType === 'ledger-trial-balance' || sub === 'trial-balance' || pathParts[2] === 'trial-balance')) {
+        const urlTb = new URL(request.url);
+        const reqBrTb = (urlTb.searchParams.get('branchId') || requestBranchId() || '').trim();
+        if (reqBrTb === 'all') {
+          return json({ error: 'Consolidated all-branches trial balance is disabled. Select a specific location.' }, 400);
+        }
+        const effectiveBrTb = reqBrTb || (await resolveBranchId(tid, null)) || '';
+        if (effectiveBrTb && !branchAllowedForAuth(auth, effectiveBrTb)) {
+          return deny('Not allowed to view ledger reports for this location.');
+        }
         const accounts = (await env.DB.prepare(`SELECT * FROM chart_of_accounts WHERE tenantId = ? ORDER BY code`).bind(tid).all()).results || [];
-        const lines = (await env.DB.prepare(
-          `SELECT jl.accountCode, SUM(jl.debit) as dr, SUM(jl.credit) as cr
-           FROM journal_lines jl
-           INNER JOIN journals j ON j.id = jl.journalId
-           WHERE jl.tenantId = ? AND IFNULL(j.voided,0) = 0
-           GROUP BY jl.accountCode`
-        ).bind(tid).all()).results || [];
+        let tbSql = `SELECT jl.accountCode, SUM(jl.debit) as dr, SUM(jl.credit) as cr
+                     FROM journal_lines jl
+                     INNER JOIN journals j ON j.id = jl.journalId
+                     WHERE jl.tenantId = ? AND IFNULL(j.voided,0) = 0`;
+        const tbBinds = [tid];
+        if (effectiveBrTb) { tbSql += ` AND j.branchId = ?`; tbBinds.push(effectiveBrTb); }
+        tbSql += ` GROUP BY jl.accountCode`;
+        const lines = (await env.DB.prepare(tbSql).bind(...tbBinds).all()).results || [];
         const map = {};
         for (const l of lines) map[l.accountCode] = { debit: Number(l.dr) || 0, credit: Number(l.cr) || 0 };
         const trial = accounts.map(a => {
@@ -4506,7 +5064,7 @@ globalThis.__neoSchemaReady = true;
         });
         const totalDr = trial.reduce((s, t) => s + t.debit, 0);
         const totalCr = trial.reduce((s, t) => s + t.credit, 0);
-        return json({ trial, totalDebit: totalDr, totalCredit: totalCr, balanced: Math.abs(totalDr - totalCr) < 0.05 });
+        return json({ trial, branchId: effectiveBrTb || null, totalDebit: totalDr, totalCredit: totalCr, balanced: Math.abs(totalDr - totalCr) < 0.05 });
       }
       if (request.method === 'GET' && routeType === 'ledger') {
         const accounts = (await env.DB.prepare(`SELECT * FROM chart_of_accounts WHERE tenantId = ? ORDER BY code`).bind(tid).all()).results || [];
@@ -4526,7 +5084,21 @@ globalThis.__neoSchemaReady = true;
       const type = (url.searchParams.get('type') || 'pnl').toLowerCase();
       const from = (url.searchParams.get('from') || '').slice(0, 10);
       const to = (url.searchParams.get('to') || '').slice(0, 10);
-      const branchId = url.searchParams.get('branchId') || '';
+      const rawBranchParam = (url.searchParams.get('branchId') || requestBranchId() || '').trim();
+      const isBranchProfitability = type === 'branch-profitability' || type === 'branch_profitability';
+      if (!isBranchProfitability && rawBranchParam === 'all') {
+        return json({ error: 'Consolidated all-branches financial reports are disabled. Select a specific location or view Branch Profitability.' }, 400);
+      }
+      const allowedListForUser = getEffectiveAllowedBranches(auth);
+      let branchId = rawBranchParam;
+      if (!isBranchProfitability) {
+        if (!branchId) branchId = (await resolveBranchId(tid, null)) || '';
+        if (branchId && !branchAllowedForAuth(auth, branchId)) {
+          return deny('Not allowed to view financial reports for this location.');
+        }
+      } else if (branchId && branchId !== 'all' && !branchAllowedForAuth(auth, branchId)) {
+        return deny('Not allowed to view financial reports for this location.');
+      }
       const groupBy = (url.searchParams.get('groupBy') || 'day').toLowerCase();
       const compareFrom = (url.searchParams.get('compareFrom') || '').slice(0, 10);
       const compareTo = (url.searchParams.get('compareTo') || '').slice(0, 10);
@@ -4547,7 +5119,7 @@ globalThis.__neoSchemaReady = true;
         const binds = [tid];
         if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
         if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
-        if (branchId && branchId !== 'all') { sql += ` AND (j.branchId = ? OR j.branchId IS NULL OR j.branchId = '')`; binds.push(branchId); }
+        if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
         sql += ` GROUP BY jl.accountCode`;
         const lines = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
         const map = {};
@@ -4581,6 +5153,7 @@ globalThis.__neoSchemaReady = true;
         const binds = [tid];
         if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
         if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+        if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
         sql += ` GROUP BY jl.accountCode`;
         const lines = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
         const map = {};
@@ -4591,7 +5164,7 @@ globalThis.__neoSchemaReady = true;
         });
         const totalDebit = trial.reduce((s, t) => s + t.debit, 0);
         const totalCredit = trial.reduce((s, t) => s + t.credit, 0);
-        return json({ type, from: from || null, to: to || null, trial, totalDebit, totalCredit, balanced: Math.abs(totalDebit - totalCredit) < 0.05 });
+        return json({ type, from: from || null, to: to || null, branchId: branchId || null, trial, totalDebit, totalCredit, balanced: Math.abs(totalDebit - totalCredit) < 0.05 });
       }
 
       // P&L
@@ -4601,12 +5174,13 @@ globalThis.__neoSchemaReady = true;
                    LEFT JOIN chart_of_accounts a ON a.tenantId = jl.tenantId AND a.code = jl.accountCode
                    WHERE jl.tenantId = ? AND IFNULL(j.voided,0) = 0`;
         const binds = [tid];
-        if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
-        if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+        if (from) { sql += ` AND substr(j.entryDate,1,10) >= ?`; binds.push(from); }
+        if (to) { sql += ` AND substr(j.entryDate,1,10) <= ?`; binds.push(to); }
+        if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
         sql += ` GROUP BY jl.accountCode`;
         const rows = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
         const income = [], expenses = [];
-        let totalIncome = 0, totalExpense = 0;
+        let totalIncome = 0, totalExpense = 0, cogs = 0;
         for (const r of rows) {
           const typeA = (r.accountType || '').toLowerCase();
           const code = r.accountCode;
@@ -4616,12 +5190,94 @@ globalThis.__neoSchemaReady = true;
             if (Math.abs(amt) > 0.001) { income.push({ code, name: r.accountName || code, amount: amt }); totalIncome += amt; }
           } else if (typeA === 'expense' || String(code).startsWith('5')) {
             const amt = Math.round((dr - cr) * 100) / 100;
-            if (Math.abs(amt) > 0.001) { expenses.push({ code, name: r.accountName || code, amount: amt }); totalExpense += amt; }
+            if (Math.abs(amt) > 0.001) {
+              expenses.push({ code, name: r.accountName || code, amount: amt });
+              totalExpense += amt;
+              if (String(code).startsWith('50') || (r.accountName || '').toLowerCase().includes('cost of goods') || (r.accountName || '').toLowerCase().includes('cogs')) {
+                cogs += amt;
+              }
+            }
           }
         }
+
+        // If journal entries are empty, provide fallback to operational sales and expenses
+        if (income.length === 0 && expenses.length === 0) {
+          let salesSql = `SELECT totalAmount, subtotal, taxAmount, taxInclusive, items, returnHistory FROM sales WHERE tenantId = ?`;
+          const sBinds = [tid];
+          if (from) { salesSql += ` AND substr(date,1,10) >= ?`; sBinds.push(from); }
+          if (to) { salesSql += ` AND substr(date,1,10) <= ?`; sBinds.push(to); }
+          if (branchId && branchId !== 'all') { salesSql += ` AND branchId = ?`; sBinds.push(branchId); }
+          const salesRows = (await env.DB.prepare(salesSql).bind(...sBinds).all()).results || [];
+
+          let rev = 0;
+          let calcCogs = 0;
+          for (const s of salesRows) {
+            const totalAmt = Number(s.totalAmount) || 0;
+            const taxAmt = Number(s.taxAmount) || 0;
+            rev += Math.max(0, totalAmt - taxAmt);
+            let items = [];
+            try { items = typeof s.items === 'string' ? JSON.parse(s.items) : (s.items || []); } catch (_) {}
+            for (const it of items) {
+              const qty = Math.max(0, (Number(it.qty ?? it.quantity) || 0) - (Number(it.returnedSaleableQty) || 0));
+              const buy = Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0;
+              calcCogs += qty * buy;
+            }
+          }
+
+          let expSql = `SELECT category, SUM(amount) as total FROM expenses WHERE tenantId = ?`;
+          const eBinds = [tid];
+          if (from) { expSql += ` AND substr(date,1,10) >= ?`; eBinds.push(from); }
+          if (to) { expSql += ` AND substr(date,1,10) <= ?`; eBinds.push(to); }
+          if (branchId && branchId !== 'all') { expSql += ` AND branchId = ?`; eBinds.push(branchId); }
+          expSql += ` GROUP BY category`;
+          const expRows = (await env.DB.prepare(expSql).bind(...eBinds).all()).results || [];
+
+          const totInc = Math.round(rev * 100) / 100;
+          const roundedCogs = Math.round(calcCogs * 100) / 100;
+          const fallbackIncome = totInc > 0 ? [
+            { code: '4000', name: 'Sales Revenue', amount: totInc }
+          ] : [];
+          const fallbackExpenses = [];
+          if (roundedCogs > 0) {
+            fallbackExpenses.push({ code: '5000', name: 'Cost of Goods Sold (COGS)', amount: roundedCogs });
+          }
+          let totalExp = roundedCogs;
+          for (const er of expRows) {
+            const amt = Math.round((Number(er.total) || 0) * 100) / 100;
+            if (amt > 0) {
+              fallbackExpenses.push({ code: '5100', name: er.category || 'Operating Expense', amount: amt });
+              totalExp += amt;
+            }
+          }
+          totalExp = Math.round(totalExp * 100) / 100;
+          const operatingExpenses = Math.round((totalExp - roundedCogs) * 100) / 100;
+          return json({
+            type, from: from || null, to: to || null, branchId: branchId || null,
+            income: fallbackIncome,
+            expenses: fallbackExpenses,
+            totalIncome: totInc,
+            cogs: roundedCogs,
+            grossProfit: Math.round((totInc - roundedCogs) * 100) / 100,
+            operatingExpenses,
+            totalExpense: totalExp,
+            netProfit: Math.round((totInc - totalExp) * 100) / 100
+          });
+        }
+
         totalIncome = Math.round(totalIncome * 100) / 100;
         totalExpense = Math.round(totalExpense * 100) / 100;
-        return json({ type, from: from || null, to: to || null, income, expenses, totalIncome, totalExpense, netProfit: Math.round((totalIncome - totalExpense) * 100) / 100 });
+        cogs = Math.round(cogs * 100) / 100;
+        const operatingExpenses = Math.round((totalExpense - cogs) * 100) / 100;
+        return json({
+          type, from: from || null, to: to || null, branchId: branchId || null,
+          income, expenses,
+          totalIncome,
+          cogs,
+          grossProfit: Math.round((totalIncome - cogs) * 100) / 100,
+          operatingExpenses,
+          totalExpense,
+          netProfit: Math.round((totalIncome - totalExpense) * 100) / 100
+        });
       }
 
       // Balance sheet
@@ -4632,6 +5288,7 @@ globalThis.__neoSchemaReady = true;
                    WHERE jl.tenantId = ? AND IFNULL(j.voided,0) = 0`;
         const binds = [tid];
         if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+        if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
         sql += ` GROUP BY jl.accountCode`;
         const rows = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
         const assets = [], liabilities = [], equity = [];
@@ -4653,7 +5310,7 @@ globalThis.__neoSchemaReady = true;
           else if (bucket === 'equity') { equity.push(row); te += bal; }
           else if (bucket === 'equity_neg') { equity.push({ ...row, balance: -bal, name: (r.accountName || code) + ' (expense)' }); te -= bal; }
         }
-        return json({ type, asOf: to || null, assets, liabilities, equity, totalAssets: Math.round(ta * 100) / 100, totalLiabilities: Math.round(tl * 100) / 100, totalEquity: Math.round(te * 100) / 100 });
+        return json({ type, asOf: to || null, branchId: branchId || null, assets, liabilities, equity, totalAssets: Math.round(ta * 100) / 100, totalLiabilities: Math.round(tl * 100) / 100, totalEquity: Math.round(te * 100) / 100 });
       }
 
       // General ledger
@@ -4666,9 +5323,10 @@ globalThis.__neoSchemaReady = true;
         if (accountCode) { sql += ` AND jl.accountCode = ?`; binds.push(accountCode); }
         if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
         if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+        if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
         sql += ` ORDER BY j.entryDate, j.createdAt, jl.id LIMIT 1000`;
         const lines = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
-        return json({ type, from: from || null, to: to || null, accountCode: accountCode || null, lines });
+        return json({ type, from: from || null, to: to || null, branchId: branchId || null, accountCode: accountCode || null, lines });
       }
 
       // Cash flow (from cash/mpesa journal lines classified by sourceType)
@@ -4679,6 +5337,7 @@ globalThis.__neoSchemaReady = true;
         const binds = [tid];
         if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
         if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+        if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
         const rows = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
         const operating = [], investing = [], financing = [];
         let op = 0, inv = 0, fin = 0;
@@ -4687,7 +5346,7 @@ globalThis.__neoSchemaReady = true;
           const st = String(r.sourceType || '');
           const entry = { date: r.entryDate, sourceType: st, accountCode: r.accountCode, amount: net, memo: r.memo || r.description };
           // Classify
-          if (st === 'sale' || st === 'customer-receipt' || st === 'expense' || st === 'po-payment' || st === 'sales-return' || st === 'po-return') {
+          if (st === 'sale' || st === 'customer-receipt' || st === 'expense' || st === 'expense-payment' || st === 'po-payment' || st === 'sales-return' || st === 'po-return') {
             operating.push(entry); op += net;
           } else if (st === 'manual' || st === 'reversal') {
             financing.push(entry); fin += net;
@@ -4696,7 +5355,7 @@ globalThis.__neoSchemaReady = true;
           }
         }
         return json({
-          type, from: from || null, to: to || null,
+          type, from: from || null, to: to || null, branchId: branchId || null,
           operating, investing, financing,
           netOperating: Math.round(op * 100) / 100,
           netInvesting: Math.round(inv * 100) / 100,
@@ -4712,7 +5371,12 @@ globalThis.__neoSchemaReady = true;
         if (from) { q += ` AND substr(date,1,10) >= ?`; b.push(from); }
         if (to) { q += ` AND substr(date,1,10) <= ?`; b.push(to); }
         if (branchId && branchId !== 'all') { q += ` AND branchId = ?`; b.push(branchId); }
-        return (await env.DB.prepare(q).bind(...b).all()).results || [];
+        const rows = (await env.DB.prepare(q).bind(...b).all()).results || [];
+        if (Array.isArray(allowedListForUser) && allowedListForUser.length) {
+          const allowSet = new Set(allowedListForUser.map(String));
+          return rows.filter(r => r.branchId && allowSet.has(String(r.branchId)));
+        }
+        return rows;
       };
       const loadExpenses = async () => {
         let q = `SELECT * FROM expenses WHERE tenantId = ?`;
@@ -4720,7 +5384,12 @@ globalThis.__neoSchemaReady = true;
         if (from) { q += ` AND substr(date,1,10) >= ?`; b.push(from); }
         if (to) { q += ` AND substr(date,1,10) <= ?`; b.push(to); }
         if (branchId && branchId !== 'all') { q += ` AND branchId = ?`; b.push(branchId); }
-        return (await env.DB.prepare(q).bind(...b).all()).results || [];
+        const rows = (await env.DB.prepare(q).bind(...b).all()).results || [];
+        if (Array.isArray(allowedListForUser) && allowedListForUser.length) {
+          const allowSet = new Set(allowedListForUser.map(String));
+          return rows.filter(r => r.branchId && allowSet.has(String(r.branchId)));
+        }
+        return rows;
       };
 
       const parseItems = (s) => {
@@ -4744,18 +5413,21 @@ globalThis.__neoSchemaReady = true;
           } else if (groupBy === 'month') key = day.slice(0, 7);
           else if (groupBy === 'branch') key = s.branchId || 'default';
           else if (groupBy === 'item' || groupBy === 'category') {
+            const taxRate = Number(s.taxRate) || 0;
             for (const it of parseItems(s.items)) {
               const k = groupBy === 'item' ? (it.name || it.id || 'item') : (it.category || 'Uncategorized');
               if (!buckets[k]) buckets[k] = { key: k, revenue: 0, qty: 0, count: 0 };
-              const line = (Number(it.price) || 0) * (Number(it.qty) || 0);
+              const netQty = Math.max(0, (Number(it.qty ?? it.quantity) || 0) - (Number(it.returnedQty) || 0));
+              const rawLine = (Number(it.price) || 0) * netQty;
+              const line = (s.taxInclusive && taxRate > 0) ? (rawLine / (1 + taxRate / 100)) : rawLine;
               buckets[k].revenue += line;
-              buckets[k].qty += Number(it.qty) || 0;
+              buckets[k].qty += netQty;
               buckets[k].count += 1;
             }
             continue;
           }
           if (!buckets[key]) buckets[key] = { key, revenue: 0, count: 0 };
-          buckets[key].revenue += Number(s.totalAmount) || 0;
+          buckets[key].revenue += Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.taxAmount) || 0));
           buckets[key].count += 1;
         }
         const rows = Object.values(buckets).map(r => ({ ...r, revenue: Math.round(r.revenue * 100) / 100 })).sort((a, b) => b.revenue - a.revenue);
@@ -4767,10 +5439,14 @@ globalThis.__neoSchemaReady = true;
         const buckets = {};
         let totalRev = 0, totalCogs = 0;
         for (const s of salesRows) {
+          const taxRate = Number(s.taxRate) || 0;
           for (const it of parseItems(s.items)) {
-            const qty = Number(it.qty) || 0;
-            const rev = (Number(it.price) || 0) * qty;
-            const cogs = (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0) * qty;
+            const origQty = Number(it.qty ?? it.quantity) || 0;
+            const netQty = Math.max(0, origQty - (Number(it.returnedQty) || 0));
+            const cogsQty = Math.max(0, origQty - (Number(it.returnedSaleableQty) || 0));
+            const rawRev = (Number(it.price) || 0) * netQty;
+            const rev = (s.taxInclusive && taxRate > 0) ? (rawRev / (1 + taxRate / 100)) : rawRev;
+            const cogs = (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0) * cogsQty;
             totalRev += rev; totalCogs += cogs;
             let key = 'All';
             if (groupBy === 'item') key = it.name || it.id || 'item';
@@ -4781,7 +5457,7 @@ globalThis.__neoSchemaReady = true;
             if (!buckets[key]) buckets[key] = { key, revenue: 0, cogs: 0, qty: 0 };
             buckets[key].revenue += rev;
             buckets[key].cogs += cogs;
-            buckets[key].qty += qty;
+            buckets[key].qty += netQty;
           }
         }
         const rows = Object.values(buckets).map(r => {
@@ -4835,8 +5511,9 @@ globalThis.__neoSchemaReady = true;
                      LEFT JOIN chart_of_accounts a ON a.tenantId = jl.tenantId AND a.code = jl.accountCode
                      WHERE jl.tenantId = ? AND IFNULL(j.voided,0) = 0`;
           const binds = [tid];
-          if (f) { sql += ` AND j.entryDate >= ?`; binds.push(f); }
-          if (t) { sql += ` AND j.entryDate <= ?`; binds.push(t); }
+          if (f) { sql += ` AND substr(j.entryDate,1,10) >= ?`; binds.push(f); }
+          if (t) { sql += ` AND substr(j.entryDate,1,10) <= ?`; binds.push(t); }
+          if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
           sql += ` GROUP BY jl.accountCode`;
           const rows = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
           let income = 0, expense = 0;
@@ -4846,6 +5523,28 @@ globalThis.__neoSchemaReady = true;
             const dr = Number(r.dr) || 0, cr = Number(r.cr) || 0;
             if (typeA === 'revenue' || code.startsWith('4')) income += (cr - dr);
             else if (typeA === 'expense' || code.startsWith('5')) expense += (dr - cr);
+          }
+          if (rows.length === 0) {
+            let sSql = `SELECT totalAmount, taxAmount, items FROM sales WHERE tenantId = ?`;
+            const sb = [tid];
+            if (f) { sSql += ` AND substr(date,1,10) >= ?`; sb.push(f); }
+            if (t) { sSql += ` AND substr(date,1,10) <= ?`; sb.push(t); }
+            if (branchId && branchId !== 'all') { sSql += ` AND branchId = ?`; sb.push(branchId); }
+            const sRows = (await env.DB.prepare(sSql).bind(...sb).all()).results || [];
+            for (const s of sRows) {
+              income += Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.taxAmount) || 0));
+              for (const it of parseItems(s.items)) {
+                const cogsQty = Math.max(0, (Number(it.qty ?? it.quantity) || 0) - (Number(it.returnedSaleableQty) || 0));
+                expense += cogsQty * (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0);
+              }
+            }
+            let eSql = `SELECT SUM(amount) as total FROM expenses WHERE tenantId = ?`;
+            const eb = [tid];
+            if (f) { eSql += ` AND substr(date,1,10) >= ?`; eb.push(f); }
+            if (t) { eSql += ` AND substr(date,1,10) <= ?`; eb.push(t); }
+            if (branchId && branchId !== 'all') { eSql += ` AND branchId = ?`; eb.push(branchId); }
+            const eRow = await env.DB.prepare(eSql).bind(...eb).first().catch(() => null);
+            expense += Number(eRow?.total) || 0;
           }
           return { income: Math.round(income * 100) / 100, expense: Math.round(expense * 100) / 100, net: Math.round((income - expense) * 100) / 100 };
         };
@@ -4875,11 +5574,11 @@ globalThis.__neoSchemaReady = true;
         for (const s of salesRows) {
           const k = s.branchId || 'default';
           const b = ensure(k);
-          b.revenue += Number(s.totalAmount) || 0;
+          b.revenue += Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.taxAmount) || 0));
           b.salesCount += 1;
           for (const it of parseItems(s.items)) {
-            const qty = Number(it.qty) || 0;
-            b.cogs += (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0) * qty;
+            const cogsQty = Math.max(0, (Number(it.qty ?? it.quantity) || 0) - (Number(it.returnedSaleableQty) || 0));
+            b.cogs += (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0) * cogsQty;
           }
         }
         for (const e of expRows) {
@@ -5007,6 +5706,7 @@ globalThis.__neoSchemaReady = true;
           const binds = [tid];
           if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
           if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+          if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
           const row = await env.DB.prepare(sql).bind(...binds).first();
           ledgerTaxDr = Number(row?.dr) || 0;
           ledgerTaxCr = Number(row?.cr) || 0;
@@ -5041,7 +5741,7 @@ globalThis.__neoSchemaReady = true;
     }
 
 
-    // Profit & Loss for selected period (from journal lines)
+    // Profit & Loss for selected period (from journal lines with operational fallback)
     if ((routeType === 'ledger-pnl' || routeType === 'ledger_pnl') && request.method === 'GET') {
       if (!auth) return deny('Auth required');
       const tid = auth.tenantId || 'tenant-default';
@@ -5049,6 +5749,14 @@ globalThis.__neoSchemaReady = true;
       const url = new URL(request.url);
       const from = (url.searchParams.get('from') || '').slice(0, 10);
       const to = (url.searchParams.get('to') || '').slice(0, 10);
+      const rawBrPnl = (url.searchParams.get('branchId') || requestBranchId() || '').trim();
+      if (rawBrPnl === 'all') {
+        return json({ error: 'Consolidated all-branches P&L is disabled. Select a specific location or view Branch Profitability.' }, 400);
+      }
+      const branchId = rawBrPnl || (await resolveBranchId(tid, null)) || '';
+      if (branchId && !branchAllowedForAuth(auth, branchId)) {
+        return deny('Not allowed to view financial P&L for this location.');
+      }
       let sql = `SELECT jl.accountCode, a.name as accountName, a.type as accountType,
                         SUM(jl.debit) as dr, SUM(jl.credit) as cr
                  FROM journal_lines jl
@@ -5056,41 +5764,88 @@ globalThis.__neoSchemaReady = true;
                  LEFT JOIN chart_of_accounts a ON a.tenantId = jl.tenantId AND a.code = jl.accountCode
                  WHERE jl.tenantId = ? AND IFNULL(j.voided,0) = 0`;
       const binds = [tid];
-      if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
-      if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+      if (from) { sql += ` AND substr(j.entryDate,1,10) >= ?`; binds.push(from); }
+      if (to) { sql += ` AND substr(j.entryDate,1,10) <= ?`; binds.push(to); }
+      if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
       sql += ` GROUP BY jl.accountCode`;
       const rows = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
       const income = [];
       const expenses = [];
-      let totalIncome = 0, totalExpense = 0;
+      let totalIncome = 0, totalExpense = 0, cogs = 0;
       for (const r of rows) {
         const type = (r.accountType || '').toLowerCase();
         const code = r.accountCode;
         const dr = Number(r.dr) || 0;
         const cr = Number(r.cr) || 0;
         // Revenue: credit-normal; expense: debit-normal
-        if (type === 'revenue' || code.startsWith('4')) {
+        if (type === 'revenue' || String(code).startsWith('4')) {
           const amt = Math.round((cr - dr) * 100) / 100;
           if (Math.abs(amt) > 0.001) {
             income.push({ code, name: r.accountName || code, amount: amt });
             totalIncome += amt;
           }
-        } else if (type === 'expense' || code.startsWith('5')) {
+        } else if (type === 'expense' || String(code).startsWith('5')) {
           const amt = Math.round((dr - cr) * 100) / 100;
           if (Math.abs(amt) > 0.001) {
             expenses.push({ code, name: r.accountName || code, amount: amt });
+            totalExpense += amt;
+            if (String(code).startsWith('50') || (r.accountName || '').toLowerCase().includes('cost of goods') || (r.accountName || '').toLowerCase().includes('cogs')) {
+              cogs += amt;
+            }
+          }
+        }
+      }
+      if (income.length === 0 && expenses.length === 0) {
+        let salesSql = `SELECT totalAmount, taxAmount, items FROM sales WHERE tenantId = ?`;
+        const sBinds = [tid];
+        if (from) { salesSql += ` AND substr(date,1,10) >= ?`; sBinds.push(from); }
+        if (to) { salesSql += ` AND substr(date,1,10) <= ?`; sBinds.push(to); }
+        if (branchId && branchId !== 'all') { salesSql += ` AND branchId = ?`; sBinds.push(branchId); }
+        const salesRows = (await env.DB.prepare(salesSql).bind(...sBinds).all()).results || [];
+        let rev = 0, calcCogs = 0;
+        for (const s of salesRows) {
+          rev += Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.taxAmount) || 0));
+          let items = [];
+          try { items = typeof s.items === 'string' ? JSON.parse(s.items) : (s.items || []); } catch (_) {}
+          for (const it of items) {
+            const qty = Math.max(0, (Number(it.qty ?? it.quantity) || 0) - (Number(it.returnedSaleableQty) || 0));
+            calcCogs += qty * (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0);
+          }
+        }
+        let expSql = `SELECT category, SUM(amount) as total FROM expenses WHERE tenantId = ?`;
+        const eBinds = [tid];
+        if (from) { expSql += ` AND substr(date,1,10) >= ?`; eBinds.push(from); }
+        if (to) { expSql += ` AND substr(date,1,10) <= ?`; eBinds.push(to); }
+        if (branchId && branchId !== 'all') { expSql += ` AND branchId = ?`; eBinds.push(branchId); }
+        expSql += ` GROUP BY category`;
+        const expRows = (await env.DB.prepare(expSql).bind(...eBinds).all()).results || [];
+
+        totalIncome = Math.round(rev * 100) / 100;
+        cogs = Math.round(calcCogs * 100) / 100;
+        if (totalIncome > 0) income.push({ code: '4000', name: 'Sales Revenue', amount: totalIncome });
+        if (cogs > 0) expenses.push({ code: '5000', name: 'Cost of Goods Sold (COGS)', amount: cogs });
+        totalExpense = cogs;
+        for (const er of expRows) {
+          const amt = Math.round((Number(er.total) || 0) * 100) / 100;
+          if (amt > 0) {
+            expenses.push({ code: '5100', name: er.category || 'Operating Expense', amount: amt });
             totalExpense += amt;
           }
         }
       }
       totalIncome = Math.round(totalIncome * 100) / 100;
       totalExpense = Math.round(totalExpense * 100) / 100;
+      cogs = Math.round(cogs * 100) / 100;
       return json({
         from: from || null,
         to: to || null,
+        branchId: branchId || null,
         income,
         expenses,
         totalIncome,
+        cogs,
+        grossProfit: Math.round((totalIncome - cogs) * 100) / 100,
+        operatingExpenses: Math.round((totalExpense - cogs) * 100) / 100,
         totalExpense,
         netProfit: Math.round((totalIncome - totalExpense) * 100) / 100
       });

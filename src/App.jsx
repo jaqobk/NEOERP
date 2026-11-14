@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import SearchableSelect from './SearchableSelect';
 import { 
   BarChart3, ShoppingBag, ArrowUpRight, DollarSign, Package, 
@@ -49,7 +49,31 @@ export default function App() {
   const [returnRequests, setReturnRequests] = useState([]);
   const [returnReasonDraft, setReturnReasonDraft] = useState('');
   const [auditActionFilter, setAuditActionFilter] = useState('');
+  const [auditUserFilter, setAuditUserFilter] = useState('');
+  const [auditDateFrom, setAuditDateFrom] = useState('');
+  const [auditDateTo, setAuditDateTo] = useState('');
+  const [auditBranchFilter, setAuditBranchFilter] = useState('');
+  const [ledgerBranchId, setLedgerBranchId] = useState('');
   const [appHydrating, setAppHydrating] = useState(false);
+  const [sessionExpiredModalOpen, setSessionExpiredModalOpen] = useState(false);
+  const [sessionReauthUser, setSessionReauthUser] = useState('');
+  const [sessionReauthPin, setSessionReauthPin] = useState('');
+  const [sessionReauthBusy, setSessionReauthBusy] = useState(false);
+  const [sessionReauthError, setSessionReauthError] = useState('');
+  const posCheckoutLockRef = useRef(false);
+  const posCheckoutIdemKeyRef = useRef('');
+  const [posCheckoutBusy, setPosCheckoutBusy] = useState(false);
+  const [offlineSyncBusy, setOfflineSyncBusy] = useState(false);
+  const [poReceiveModalOpen, setPoReceiveModalOpen] = useState(false);
+  const [poReceivePO, setPoReceivePO] = useState(null);
+  const [poReceiveLineQtys, setPoReceiveLineQtys] = useState({});
+  const [poReceiveBusy, setPoReceiveBusy] = useState(false);
+  const [legacyAssignModalOpen, setLegacyAssignModalOpen] = useState(false);
+  const [legacyAssignMode, setLegacyAssignMode] = useState('assign');
+  const [legacyAssignBranchId, setLegacyAssignBranchId] = useState('');
+  const [legacyAssignBranchQtys, setLegacyAssignBranchQtys] = useState({});
+  const [legacyAssignSelectedIds, setLegacyAssignSelectedIds] = useState({});
+  const [legacyAssignBusy, setLegacyAssignBusy] = useState(false);
   const [superProfile, setSuperProfile] = useState({ username: '', displayName: '' });
   const [platformKpis, setPlatformKpis] = useState(null);
   const [branches, setBranches] = useState([]);
@@ -115,8 +139,11 @@ export default function App() {
       headers['Content-Type'] = 'application/json';
     }
     return fetch(url, { ...options, headers }).then(async (res) => {
-      if (res.status === 401 && token && !url.includes('/api/login') && !url.includes('/api/super-login') && !url.includes('/api/signup')) {
-        handleLogout('Your session has ended. Please sign in to continue.');
+      if (res.status === 401 && token && !url.includes('/api/login') && !url.includes('/api/super-login') && !url.includes('/api/signup') && !url.includes('/api/logout')) {
+        setSessionReauthUser(prev => prev || currentUser?.name || superProfile?.username || '');
+        setSessionReauthPin('');
+        setSessionReauthError('Session expired — sign in again to continue without losing your work.');
+        setSessionExpiredModalOpen(true);
       }
       return res;
     });
@@ -550,6 +577,7 @@ export default function App() {
   const [posSearchQuery, setPosSearchQuery] = useState('');
   const [posCashPaid, setPosCashPaid] = useState('');
   const [posRedeemPoints, setPosRedeemPoints] = useState('');
+  const [posAccountCreditUsed, setPosAccountCreditUsed] = useState('');
   const [posMpesaPaid, setPosMpesaPaid] = useState('');
   const [posMpesaCode, setPosMpesaCode] = useState('');
   const [posBankPaid, setPosBankPaid] = useState('');
@@ -565,7 +593,7 @@ export default function App() {
   // Modals & Editing Inspection States
   const [newItemModalOpen, setNewItemModalOpen] = useState(false);
   const [newCustomerModalOpen, setNewCustomerModalOpen] = useState(false);
-  const [itemForm, setItemForm] = useState({ wholesalePrice: '', name: '', sku: '', size: '', colour: '', category: 'Grade A Jackets', buyingPrice: '', price: '', quantity: '', lowStockAlert: 3, trackInventory: true, status: 'Listed', photoUrl: '', varianceValues: {}, branchId: '', allLocations: false });
+  const [itemForm, setItemForm] = useState({ wholesalePrice: '', name: '', sku: '', size: '', colour: '', category: 'Grade A Jackets', buyingPrice: '', price: '', quantity: '', lowStockAlert: 3, trackInventory: true, status: 'Listed', photoUrl: '', varianceValues: {}, branchId: '', allLocations: false, locationMode: 'single', allowedBranches: [], locationQuantities: {} });
   const [duplicatingItemName, setDuplicatingItemName] = useState('');
   // User-defined item variance attributes (e.g. Size, Colour, Material) — configured under Settings → Items Setting
   const [itemVariances, setItemVariances] = useState([
@@ -573,7 +601,7 @@ export default function App() {
     { id: 'var-colour', name: 'Colour' }
   ]);
   const [varianceDraft, setVarianceDraft] = useState('');
-  const [customerForm, setCustomerForm] = useState({ name: '', phone: '', location: '', eligibility: ['Paid'], salesTermId: '', paymentTerm: '', tags: '', priceList: 'retail', kraPin: '', loyaltyPoints: 0, creditLimit: 0, branchId: '', allLocations: true });
+  const [customerForm, setCustomerForm] = useState({ name: '', phone: '', location: '', eligibility: ['Paid'], salesTermId: '', paymentTerm: '', tags: '', priceList: 'retail', kraPin: '', loyaltyPoints: 0, creditLimit: 0, creditBalance: 0, branchId: '', allLocations: true });
 
   const parseItemVarianceValues = (item) => {
     if (!item) return {};
@@ -673,7 +701,7 @@ export default function App() {
     payrollCycle: 'Monthly',
     payDay: 28
   });
-  const [employeeForm, setEmployeeForm] = useState({ name: '', position: '', department: 'Sales', phone: '', email: '', hireDate: '', salary: '', status: 'Active', nationalId: '', bankAccount: '', bankName: '', leaveBalance: 21, managerId: '' });
+  const [employeeForm, setEmployeeForm] = useState({ name: '', position: '', department: 'Sales', phone: '', email: '', hireDate: '', salary: '', status: 'Active', nationalId: '', bankAccount: '', bankName: '', leaveBalance: 21, managerId: '', branchId: '' });
   const [employeeModalOpen, setEmployeeModalOpen] = useState(false);
   const [selectedEmployee, setSelectedEmployee] = useState(null);
   const [leaveForm, setLeaveForm] = useState({ employeeId: '', leaveType: 'Annual', startDate: '', endDate: '', reason: '' });
@@ -724,7 +752,28 @@ export default function App() {
       .then(data => {
         if (data) {
           if (Array.isArray(data.inventory)) {
-            setInventory(data.inventory);
+            setInventory(data.inventory.map(item => {
+              let locationQuantities = item.locationQuantities;
+              if (typeof locationQuantities === 'string') {
+                try { locationQuantities = JSON.parse(locationQuantities); } catch (_) { locationQuantities = {}; }
+              }
+              let allowedBranches = item.allowedBranches;
+              if (typeof allowedBranches === 'string') {
+                try { allowedBranches = JSON.parse(allowedBranches); } catch (_) { allowedBranches = []; }
+              }
+              allowedBranches = Array.isArray(allowedBranches) ? allowedBranches.map(String).filter(Boolean) : [];
+              const rawAllLocations = Boolean(item.rawAllLocations ?? (item.allLocations === true || item.allLocations === 1 || item.branchId === 'all'));
+              const allLocations = Boolean(item.allLocations === true || item.allLocations === 1 || item.branchId === 'all' || (!item.branchId && allowedBranches.length === 0));
+              const isLegacyUnassigned = Boolean(item.isLegacyUnassigned ?? (!item.branchId && !rawAllLocations && allowedBranches.length === 0));
+              return {
+                ...item,
+                rawAllLocations,
+                allLocations,
+                isLegacyUnassigned,
+                allowedBranches,
+                locationQuantities: (locationQuantities && typeof locationQuantities === 'object' && !Array.isArray(locationQuantities)) ? locationQuantities : {}
+              };
+            }));
           }
           if (Array.isArray(data.sales)) {
             const mapped = data.sales.map(s => {
@@ -747,6 +796,7 @@ export default function App() {
               ...c,
               loyaltyPoints: parseFloat(c.loyaltyPoints) || 0,
               creditLimit: parseFloat(c.creditLimit) || 0,
+              creditBalance: parseFloat(c.creditBalance) || 0,
               eligibility: typeof c.eligibility === 'string' ? JSON.parse(c.eligibility || '["Paid"]') : (c.eligibility || ['Paid'])
             }));
             setCustomers(custs);
@@ -776,7 +826,9 @@ export default function App() {
               try { if (typeof ph === 'string') ph = JSON.parse(ph || '[]'); } catch (_) { ph = []; }
               let rh = p.returnHistory;
               try { if (typeof rh === 'string') rh = JSON.parse(rh || '[]'); } catch (_) { rh = []; }
-              return { ...p, paymentHistory: Array.isArray(ph) ? ph : [], returnHistory: Array.isArray(rh) ? rh : [] };
+              let rcvh = p.receiveHistory;
+              try { if (typeof rcvh === 'string') rcvh = JSON.parse(rcvh || '[]'); } catch (_) { rcvh = []; }
+              return { ...p, receivedQty: Number(p.receivedQty) || 0, receiveHistory: Array.isArray(rcvh) ? rcvh : [], paymentHistory: Array.isArray(ph) ? ph : [], returnHistory: Array.isArray(rh) ? rh : [] };
             }));
           }
           if (data.users?.length) {
@@ -1054,7 +1106,42 @@ export default function App() {
   const handleSaveInventory = async (itemToSave) => {
     try {
       const vv = parseItemVarianceValues(itemToSave);
-      const normalized = applyVarianceValuesToItem(itemToSave, vv);
+      let normalized = applyVarianceValuesToItem(itemToSave, vv);
+      const allowedBrs = parseAllowedBranches(normalized).map(String).filter(Boolean);
+      const mode = normalized.locationMode || (isItemInAllLocations(normalized) ? 'all' : (allowedBrs.length > 0 ? 'multi' : 'single'));
+      const isAllLoc = mode === 'all';
+      const tracked = isTrackedInventory(normalized);
+      const rawLq = parseLocationQuantities(normalized);
+      const cleanLq = {};
+      if (mode === 'all') {
+        const pool = (accessibleBranches && accessibleBranches.length ? accessibleBranches : (branches || []));
+        pool.forEach(b => {
+          cleanLq[b.id] = tracked ? Math.max(0, Number(rawLq[b.id]) || 0) : 999;
+        });
+        Object.keys(rawLq).forEach(k => {
+          if (cleanLq[k] === undefined) cleanLq[k] = tracked ? Math.max(0, Number(rawLq[k]) || 0) : 999;
+        });
+      } else if (mode === 'multi') {
+        if (allowedBrs.length === 0) {
+          alert('Please select at least one location or choose "All locations".');
+          return;
+        }
+        allowedBrs.forEach(bid => {
+          cleanLq[bid] = tracked ? Math.max(0, Number(rawLq[bid]) || 0) : 999;
+        });
+      }
+      const totalQty = (mode === 'all' || mode === 'multi')
+        ? (tracked ? Object.values(cleanLq).reduce((s, v) => s + (Number(v) || 0), 0) : 999)
+        : (tracked ? Math.max(0, parseInt(normalized.quantity, 10) || 0) : 999);
+      normalized = {
+        ...normalized,
+        allLocations: isAllLoc,
+        allowedBranches: mode === 'multi' ? allowedBrs : [],
+        locationQuantities: cleanLq,
+        branchId: (mode === 'all' || mode === 'multi') ? '' : (normalized.branchId || activeBranchId || ''),
+        quantity: totalQty,
+        locationMode: mode
+      };
       const prev = inventory.find(i => i.id === normalized.id);
       // Optimistic local update so Save feels instant
       setInventory(inventory.map(i => i.id === normalized.id ? normalized : i));
@@ -1586,41 +1673,86 @@ export default function App() {
     return def ? def.id : '';
   })();
 
+  const parseAllowedBranches = (item) => {
+    if (!item) return [];
+    let ab = item.allowedBranches;
+    if (typeof ab === 'string') {
+      try { ab = JSON.parse(ab || '[]'); } catch (_) { ab = []; }
+    }
+    return Array.isArray(ab) ? ab.map(String).filter(Boolean) : [];
+  };
+
+  const isAdminRole = (currentUser?.role || '').toLowerCase() === 'admin' || (currentUser?.role || '').toLowerCase() === 'superadmin' || !!tenantInfo?.isSuperAdmin;
+  const hasViewAllBranchesPriv = Boolean(
+    isAdminRole ||
+    (earlyAllowedBranchIds === null && (branches || []).length > 0) ||
+    (Array.isArray(earlyAllowedBranchIds) && (branches || []).length > 0 && (branches || []).every(b => earlyAllowedBranchIds.includes(String(b.id))))
+  );
+  const showAllBranchesScope = Boolean(hasViewAllBranchesPriv && (!currentBranchId || currentBranchId === 'all'));
+  const strictActiveBranchId = (!showAllBranchesScope && currentBranchId && currentBranchId !== 'all' && (!earlyAllowedBranchIds || earlyAllowedBranchIds.includes(String(currentBranchId))))
+    ? currentBranchId
+    : activeBranchId;
+
+  const filterStrictByBranch = (list, isMasterEntity = false) => {
+    if (!list || !Array.isArray(list)) return [];
+    let rows = list;
+    if (earlyAllowedBranchIds) {
+      rows = rows.filter(row => {
+        if (isMasterEntity) {
+          const allowedBrs = parseAllowedBranches(row);
+          const isAll = row?.allLocations === true || row?.allLocations === 1 || row?.allLocations === 'true' || row?.branchId === 'all' || (!row?.branchId && allowedBrs.length === 0);
+          if (isAll) return true;
+          if (allowedBrs.length > 0) return allowedBrs.some(b => earlyAllowedBranchIds.includes(String(b)));
+        }
+        const bid = resolveRowBranchId(row);
+        return !bid || earlyAllowedBranchIds.includes(String(bid));
+      });
+    }
+    if (showAllBranchesScope) return rows;
+    const targetId = strictActiveBranchId;
+    if (!targetId) return rows;
+    if (isMasterEntity) {
+      return rows.filter(row => {
+        const allowedBrs = parseAllowedBranches(row);
+        if (row?.branchId && row.branchId !== 'all') return String(row.branchId) === String(targetId);
+        if (allowedBrs.length > 0) return allowedBrs.includes(String(targetId));
+        return row?.allLocations === true || row?.allLocations === 1 || row?.allLocations === 'true' || row?.branchId === 'all' || !row?.branchId;
+      });
+    }
+    return rows.filter(row => resolveRowBranchId(row) === targetId);
+  };
+
   const filterByBranch = (list, isMasterEntity = false) => {
     if (!list || !Array.isArray(list)) return [];
     let rows = list;
+    const matchMasterForBranch = (row, bId) => {
+      const allowedBrs = parseAllowedBranches(row);
+      const isAll = row?.allLocations === true || row?.allLocations === 1 || row?.allLocations === 'true' || row?.branchId === 'all' || (!row?.branchId && allowedBrs.length === 0);
+      if (isAll) return true;
+      if (allowedBrs.length > 0) return allowedBrs.includes(String(bId));
+      return resolveRowBranchId(row) === bId;
+    };
     if (isRestrictedToSingleLocation) {
       const targetId = activeBranchId;
       if (!targetId) return rows;
-      return rows.filter(row => {
-        if (isMasterEntity) {
-          if (row?.allLocations === true || row?.allLocations === 'true' || row?.branchId === 'all' || !row?.branchId) return true;
-          if (Array.isArray(row?.allowedBranches) && row.allowedBranches.includes(targetId)) return true;
-          return resolveRowBranchId(row) === targetId;
-        }
-        return resolveRowBranchId(row) === targetId;
-      });
+      return rows.filter(row => isMasterEntity ? matchMasterForBranch(row, targetId) : resolveRowBranchId(row) === targetId);
     }
     if (earlyAllowedBranchIds) {
       rows = rows.filter(row => {
         if (isMasterEntity) {
-          if (row?.allLocations === true || row?.allLocations === 'true' || row?.branchId === 'all' || !row?.branchId) return true;
+          const allowedBrs = parseAllowedBranches(row);
+          const isAll = row?.allLocations === true || row?.allLocations === 1 || row?.allLocations === 'true' || row?.branchId === 'all' || (!row?.branchId && allowedBrs.length === 0);
+          if (isAll) return true;
+          if (allowedBrs.length > 0) return allowedBrs.some(b => earlyAllowedBranchIds.includes(String(b)));
           const bid = resolveRowBranchId(row);
-          return earlyAllowedBranchIds.includes(String(bid)) || (Array.isArray(row?.allowedBranches) && row.allowedBranches.some(b => earlyAllowedBranchIds.includes(String(b))));
+          return earlyAllowedBranchIds.includes(String(bid));
         }
         const bid = resolveRowBranchId(row);
         return earlyAllowedBranchIds.includes(String(bid));
       });
     }
     if (!currentBranchId || currentBranchId === 'all') return rows;
-    return rows.filter(row => {
-      if (isMasterEntity) {
-        if (row?.allLocations === true || row?.allLocations === 'true' || row?.branchId === 'all' || !row?.branchId) return true;
-        if (Array.isArray(row?.allowedBranches) && row.allowedBranches.includes(currentBranchId)) return true;
-        return resolveRowBranchId(row) === currentBranchId;
-      }
-      return resolveRowBranchId(row) === currentBranchId;
-    });
+    return rows.filter(row => isMasterEntity ? matchMasterForBranch(row, currentBranchId) : resolveRowBranchId(row) === currentBranchId);
   };
 
   // Normalize sale line items (API / localStorage may store JSON string)
@@ -1635,6 +1767,91 @@ export default function App() {
   const isTrackedInventory = (item) => {
     const t = item?.trackInventory;
     return t === true || t === 1 || t === '1' || t === 'true';
+  };
+
+  const parseLocationQuantities = (item) => {
+    if (!item) return {};
+    let lq = item.locationQuantities;
+    if (typeof lq === 'string') {
+      try { lq = JSON.parse(lq); } catch (_) { lq = {}; }
+    }
+    return (lq && typeof lq === 'object' && !Array.isArray(lq)) ? lq : {};
+  };
+
+  const isItemInAllLocations = (item) => {
+    const allowedBrs = parseAllowedBranches(item);
+    return Boolean(item?.allLocations === true || item?.allLocations === 1 || item?.branchId === 'all' || (!item?.branchId && allowedBrs.length === 0));
+  };
+
+  const getItemLocationQuantity = (item, targetBranchId) => {
+    if (!item) return 0;
+    if (!isTrackedInventory(item)) return 999;
+    const lq = parseLocationQuantities(item);
+    const allowedBrs = parseAllowedBranches(item);
+    const isAll = isItemInAllLocations(item);
+    const branchKey = targetBranchId || activeBranchId;
+
+    // When a specific location is selected
+    if (branchKey && branchKey !== 'all') {
+      if (!isAll && allowedBrs.length > 0 && !allowedBrs.includes(String(branchKey))) {
+        return 0;
+      }
+      if (!isAll && allowedBrs.length === 0 && item.branchId && String(item.branchId) !== String(branchKey)) {
+        return 0;
+      }
+      if (lq[branchKey] !== undefined && lq[branchKey] !== null && lq[branchKey] !== '') {
+        return Number(lq[branchKey]) || 0;
+      }
+      if (String(item.branchId || '') === String(branchKey)) {
+        return Number(item.quantity) || 0;
+      }
+      if (isAll || allowedBrs.includes(String(branchKey))) {
+        const keys = Object.keys(lq);
+        if (keys.length > 0) {
+          return Number(lq[branchKey]) || 0;
+        }
+        return Number(item.quantity) || 0;
+      }
+      return 0;
+    }
+
+    // When "All Locations" view is active
+    const keys = Object.keys(lq);
+    if (keys.length > 0) {
+      if (!isAll && allowedBrs.length > 0) {
+        return allowedBrs.reduce((sum, k) => sum + (Number(lq[k]) || 0), 0);
+      }
+      return keys.reduce((sum, k) => sum + (Number(lq[k]) || 0), 0);
+    }
+    return Number(item.quantity) || 0;
+  };
+
+  const getItemLocationValuation = (item, targetBranchId) => {
+    if (!item || !isTrackedInventory(item)) return 0;
+    const qty = getItemLocationQuantity(item, targetBranchId);
+    const buying = Number(item?.buyingPrice) || 0;
+    return qty * buying;
+  };
+
+  const getItemLocationBreakdown = (item) => {
+    if (!item) return [];
+    const allowedBrs = parseAllowedBranches(item);
+    const isAll = isItemInAllLocations(item);
+    const pool = (branches || []);
+    let targetBranches = [];
+    if (isAll) {
+      targetBranches = pool;
+    } else if (allowedBrs.length > 0) {
+      targetBranches = pool.filter(b => allowedBrs.includes(String(b.id)));
+    } else if (item.branchId) {
+      const m = pool.find(b => String(b.id) === String(item.branchId));
+      targetBranches = m ? [m] : [{ id: item.branchId, name: item.branchId }];
+    }
+    return targetBranches.map(b => {
+      const qty = getItemLocationQuantity(item, b.id);
+      const value = getItemLocationValuation(item, b.id);
+      return { branchId: b.id, branchName: b.name || b.id, qty, value };
+    });
   };
 
   // Fixed Date Range Filtering Helper
@@ -1718,6 +1935,41 @@ export default function App() {
   const branchEmployees = filterByBranch(employees, false);
   const branchCustomers = filterByBranch(customers, true);
   const branchSuppliers = filterByBranch(suppliers, true);
+  const strictBranchSales = filterStrictByBranch(sales, false);
+  const strictBranchExpenses = filterStrictByBranch(expenses, false);
+  const strictBranchPOs = filterStrictByBranch(purchaseOrders, false);
+  const strictBranchEmployees = filterStrictByBranch(employees, false);
+  const strictBranchEmpIdSet = new Set((strictBranchEmployees || []).map(e => String(e.id)));
+  const filterHRRow = (row) => {
+    if (!row) return false;
+    if (showAllBranchesScope) {
+      if (!earlyAllowedBranchIds) return true;
+      const bid = row.branchId || (row.employeeId ? employees.find(e => String(e.id) === String(row.employeeId))?.branchId : '');
+      return !bid || earlyAllowedBranchIds.includes(String(bid));
+    }
+    if (row.branchId && strictActiveBranchId) return String(row.branchId) === String(strictActiveBranchId);
+    if (row.employeeId && strictBranchEmpIdSet.size > 0) return strictBranchEmpIdSet.has(String(row.employeeId));
+    if (row.employeeId && employees.some(e => String(e.id) === String(row.employeeId))) return false;
+    return strictActiveBranchId && (branches || []).length > 1 ? resolveRowBranchId(row) === strictActiveBranchId : true;
+  };
+  const strictBranchLeaveRequests = (leaveRequests || []).filter(filterHRRow);
+  const strictBranchPayrollRecords = (payrollRecords || []).filter(filterHRRow);
+  const strictBranchCustomers = (() => {
+    if (showAllBranchesScope) return filterStrictByBranch(customers, true);
+    const targetId = strictActiveBranchId;
+    if (!targetId || (branches || []).length <= 1) return customers || [];
+    const saleCustNames = new Set((strictBranchSales || []).map(s => String(s.customerName || '').trim().toLowerCase()).filter(Boolean));
+    const saleCustIds = new Set((strictBranchSales || []).map(s => String(s.customerId || '').trim()).filter(Boolean));
+    return (customers || []).filter(c => {
+      if (c.branchId && String(c.branchId) === String(targetId)) return true;
+      const allowedBrs = parseAllowedBranches(c);
+      if (allowedBrs.length > 0 && allowedBrs.includes(String(targetId))) return true;
+      if (saleCustIds.has(String(c.id)) || (c.name && saleCustNames.has(String(c.name).trim().toLowerCase()))) return true;
+      const bObj = (branches || []).find(b => String(b.id) === String(targetId));
+      if (bObj && c.location && bObj.name && String(c.location).toLowerCase() === String(bObj.name).toLowerCase()) return true;
+      return !c.branchId && allowedBrs.length === 0;
+    });
+  })();
   const filteredSales = filterByTimeframe(branchSales, 'date');
   const filteredExpenses = filterByTimeframe(branchExpenses, 'date');
   const historyFilteredExpenses = filterExpensesHistory(branchExpenses);
@@ -1762,15 +2014,15 @@ export default function App() {
   const reportFilteredExpenses = filterByReportTimeframe(branchExpenses, 'date');
   const reportFilteredPO = filterByReportTimeframe(branchPurchaseOrders, 'date');
 
-  const reportTotalRevenue = reportFilteredSales.reduce((acc, s) => acc + (s.totalAmount || 0), 0);
-  const reportTotalCogs = reportFilteredSales.reduce((acc, s) => acc + (parseSaleItems(s).reduce((iAcc, item) => iAcc + (Number(item.cogs) || 0) * Math.max(0, (Number(item.qty) || 1) - (Number(item.returnedSaleableQty) || 0)), 0)), 0);
+  const reportTotalRevenue = reportFilteredSales.reduce((acc, s) => acc + Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.taxAmount) || 0)), 0);
+  const reportTotalCogs = reportFilteredSales.reduce((acc, s) => acc + (parseSaleItems(s).reduce((iAcc, item) => iAcc + (Number(item.cogs != null && item.cogs !== '' ? item.cogs : item.buyingPrice) || 0) * Math.max(0, (Number(item.qty ?? item.quantity) || 0) - (Number(item.returnedSaleableQty) || 0)), 0)), 0);
   const reportGrossProfit = reportTotalRevenue - reportTotalCogs;
   const reportTotalOperatingExpenses = reportFilteredExpenses.reduce((acc, e) => acc + (e.amount || 0), 0);
   const reportNetProfit = reportGrossProfit - reportTotalOperatingExpenses;
 
   // Safe Financial Calculations
-  const totalRevenue = filteredSales.reduce((acc, s) => acc + (s.totalAmount || 0), 0);
-  const totalCogs = filteredSales.reduce((acc, s) => acc + (parseSaleItems(s).reduce((iAcc, item) => iAcc + (Number(item.cogs) || 0) * Math.max(0, (Number(item.qty) || 1) - (Number(item.returnedSaleableQty) || 0)), 0)), 0);
+  const totalRevenue = filteredSales.reduce((acc, s) => acc + Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.taxAmount) || 0)), 0);
+  const totalCogs = filteredSales.reduce((acc, s) => acc + (parseSaleItems(s).reduce((iAcc, item) => iAcc + (Number(item.cogs != null && item.cogs !== '' ? item.cogs : item.buyingPrice) || 0) * Math.max(0, (Number(item.qty ?? item.quantity) || 0) - (Number(item.returnedSaleableQty) || 0)), 0)), 0);
   const grossProfit = totalRevenue - totalCogs;
   const totalOperatingExpenses = filteredExpenses.reduce((acc, e) => acc + (e.amount || 0), 0);
   const netProfit = grossProfit - totalOperatingExpenses;
@@ -1934,13 +2186,15 @@ export default function App() {
 
   // 10 Low Stock Alerts list for Dashboard & Inventory
 
-  const lowStockAlertList = (inventory || []).filter(i => isTrackedInventory(i) && (Number(i.quantity) || 0) <= (Number(i.lowStockAlert) || 3)).slice(0, 10);
+  const activeLocKey = (currentBranchId && currentBranchId !== 'all') ? currentBranchId : '';
+  const lowStockAlertList = (branchInventory || []).filter(i => isTrackedInventory(i) && getItemLocationQuantity(i, activeLocKey || 'all') <= (Number(i.lowStockAlert) || 3)).slice(0, 10);
   // Report helpers (Inventory / Sales by location / Expense by location / Payroll breakdown)
-  const reportFilteredInventory = filterByBranch(inventory || []);
+  const reportFilteredInventory = filterByBranch(inventory || [], true);
   const inventoryValuationRows = (reportFilteredInventory || []).map(i => {
-    const qty = Number(i.quantity) || 0;
+    const qty = isTrackedInventory(i) ? (activeLocKey ? getItemLocationQuantity(i, activeLocKey) : getItemLocationQuantity(i, 'all')) : 0;
     const cost = Number(i.buyingPrice) || 0;
-    return { id: i.id, name: i.name, category: i.category || '—', qty, cost, value: qty * cost, branchId: i.branchId || '' };
+    const value = isTrackedInventory(i) ? getItemLocationValuation(i, activeLocKey || 'all') : 0;
+    return { id: i.id, name: i.name, category: i.category || '—', qty, cost, value, branchId: activeLocKey || i.branchId || 'all', allLocations: isItemInAllLocations(i), trackInventory: isTrackedInventory(i) };
   });
   const inventoryValuationTotal = inventoryValuationRows.reduce((s, r) => s + r.value, 0);
   const soldItemIds = new Set();
@@ -1957,28 +2211,40 @@ export default function App() {
     return !soldItemIds.has(id) && !soldItemIds.has(name);
   }).slice(0, 50);
   const stockBalanceRows = inventoryValuationRows.slice().sort((a, b) => (b.qty || 0) - (a.qty || 0));
-  const branchStockValuation = {};
-  inventoryValuationRows.forEach(r => {
-    const key = r.branchId || 'default';
-    if (!branchStockValuation[key]) branchStockValuation[key] = { branchId: key, value: 0, qty: 0, items: 0 };
-    branchStockValuation[key].value += r.value;
-    branchStockValuation[key].qty += r.qty;
-    branchStockValuation[key].items += 1;
+  const valuationBranchesPool = activeLocKey
+    ? (branches || []).filter(b => String(b.id) === String(activeLocKey))
+    : (branches && branches.length > 0 ? branches : [{ id: 'default', name: 'Default Store' }]);
+  const branchStockValuationList = valuationBranchesPool.map(b => {
+    let bValue = 0;
+    let bQty = 0;
+    let bItems = 0;
+    (inventory || []).forEach(i => {
+      if (!isTrackedInventory(i)) return;
+      const q = getItemLocationQuantity(i, b.id);
+      if (q > 0) {
+        bQty += q;
+        bValue += q * (Number(i.buyingPrice) || 0);
+        bItems += 1;
+      }
+    });
+    return {
+      branchId: b.id,
+      name: b.name,
+      items: bItems,
+      qty: bQty,
+      value: Math.round(bValue * 100) / 100
+    };
   });
-  const branchStockValuationList = Object.values(branchStockValuation).map(b => ({
-    ...b,
-    name: (branches || []).find(x => x.id === b.branchId)?.name || (b.branchId === 'default' ? 'Default / Unassigned' : b.branchId)
-  }));
   const salesByLocationMap = {};
   (reportFilteredSales || []).forEach(s => {
     const key = s.branchId || 'default';
     if (!salesByLocationMap[key]) salesByLocationMap[key] = { branchId: key, revenue: 0, cogs: 0, count: 0 };
-    salesByLocationMap[key].revenue += Number(s.totalAmount) || 0;
+    salesByLocationMap[key].revenue += Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.taxAmount) || 0));
     salesByLocationMap[key].count += 1;
     try {
       const items = typeof s.items === 'string' ? JSON.parse(s.items || '[]') : (s.items || []);
       (items || []).forEach(it => {
-        const qty = Number(it.qty) || 0;
+        const qty = Math.max(0, (Number(it.qty ?? it.quantity) || 0) - (Number(it.returnedSaleableQty) || 0));
         salesByLocationMap[key].cogs += (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0) * qty;
       });
     } catch (_) {}
@@ -2022,7 +2288,7 @@ export default function App() {
   }).filter(r => r.samples > 1 || r.variation > 0).sort((a, b) => b.variation - a.variation).slice(0, 30);
   const payrollAllowancesTotals = {};
   const payrollDeductionsTotals = {};
-  (payrollRecords || []).forEach(p => {
+  (strictBranchPayrollRecords || []).forEach(p => {
     // optional period filter via report dates
     const pd = String(p.period || p.paidDate || p.date || '');
     if (reportTimeframe === 'custom' && reportStartDate && reportEndDate) {
@@ -2288,7 +2554,107 @@ export default function App() {
     setSalesTargets(next);
     apiFetch('/api/tenant-settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ salesTargets: next }) }).catch(() => {});
   };
-  const saveOfflineQueue = (next) => { setOfflineQueue(next); try { localStorage.setItem('erp_offline_queue', JSON.stringify(next)); } catch (e) {} };
+  const normalizeQueueJob = (job, idx = 0) => {
+    if (!job || typeof job !== 'object') return null;
+    const status = ['pending', 'failed', 'synced'].includes(job.status) ? job.status : 'pending';
+    return {
+      ...job,
+      id: job.id || `oq-${job.at || Date.now()}-${idx}`,
+      type: job.type || 'sale',
+      at: job.at || new Date().toISOString(),
+      status,
+      lastError: job.lastError || ''
+    };
+  };
+  const saveOfflineQueue = (next) => {
+    const clean = (Array.isArray(next) ? next : []).map((j, i) => normalizeQueueJob(j, i)).filter(Boolean);
+    setOfflineQueue(clean);
+    try { localStorage.setItem('erp_offline_queue', JSON.stringify(clean)); } catch (e) {}
+  };
+  const refreshAllDataFromServer = async () => {
+    try {
+      const r = await apiFetch('/api/all-data');
+      if (!r.ok) return false;
+      const payload = await r.json();
+      if (payload && Array.isArray(payload.inventory)) {
+        setInventory(payload.inventory.map(item => {
+          let lq = item.locationQuantities;
+          if (typeof lq === 'string') { try { lq = JSON.parse(lq); } catch (_) { lq = {}; } }
+          let ab = item.allowedBranches;
+          if (typeof ab === 'string') { try { ab = JSON.parse(ab); } catch (_) { ab = []; } }
+          ab = Array.isArray(ab) ? ab.map(String).filter(Boolean) : [];
+          const rawAllLocations = Boolean(item.rawAllLocations ?? (item.allLocations === true || item.allLocations === 1 || item.branchId === 'all'));
+          const allLoc = Boolean(item.allLocations === true || item.allLocations === 1 || item.branchId === 'all' || (!item.branchId && ab.length === 0));
+          const isLegacyUnassigned = Boolean(item.isLegacyUnassigned ?? (!item.branchId && !rawAllLocations && ab.length === 0));
+          return { ...item, rawAllLocations, allLocations: allLoc, isLegacyUnassigned, allowedBranches: ab, locationQuantities: (lq && typeof lq === 'object' && !Array.isArray(lq)) ? lq : {} };
+        }));
+      }
+      if (payload && Array.isArray(payload.purchaseOrders)) {
+        setPurchaseOrders(payload.purchaseOrders.map(p => {
+          let ph = p.paymentHistory;
+          try { if (typeof ph === 'string') ph = JSON.parse(ph || '[]'); } catch (_) { ph = []; }
+          let rh = p.returnHistory;
+          try { if (typeof rh === 'string') rh = JSON.parse(rh || '[]'); } catch (_) { rh = []; }
+          let rcvh = p.receiveHistory;
+          try { if (typeof rcvh === 'string') rcvh = JSON.parse(rcvh || '[]'); } catch (_) { rcvh = []; }
+          return { ...p, receivedQty: Number(p.receivedQty) || 0, receiveHistory: Array.isArray(rcvh) ? rcvh : [], items: typeof p.items === 'string' ? (() => { try { return JSON.parse(p.items); } catch { return p.items; } })() : p.items, paymentHistory: Array.isArray(ph) ? ph : [], returnHistory: Array.isArray(rh) ? rh : [] };
+        }));
+      }
+      if (payload && Array.isArray(payload.stockMovements)) {
+        setStockMovements(payload.stockMovements.map(m => ({ ...m, user: m.userName || m.user || '', qtyChange: Number(m.qtyChange) || 0 })));
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+  const syncOfflineQueue = async ({ onlyFailed = false } = {}) => {
+    if (offlineSyncBusy) return { synced: 0, failed: 0, pending: 0 };
+    setOfflineSyncBusy(true);
+    let syncedNow = 0;
+    let failedNow = 0;
+    let authStopped = false;
+    try {
+      const raw = localStorage.getItem('erp_offline_queue') || '[]';
+      const parsed = JSON.parse(raw);
+      const q = (Array.isArray(parsed) ? parsed : []).map((j, i) => normalizeQueueJob(j, i)).filter(Boolean);
+      const updated = [];
+      for (const job of q) {
+        if (job.status === 'synced') { updated.push(job); continue; }
+        if (onlyFailed && job.status !== 'failed') { updated.push(job); continue; }
+        if (authStopped) { updated.push(job); continue; }
+        const endpoint = job.type === 'expense' ? '/api/expenses' : '/api/sales';
+        try {
+          const payload = { ...(job.payload || {}) };
+          if (!payload.branchId && activeBranchId) payload.branchId = activeBranchId;
+          const res = await apiFetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+          if (res.status === 401) {
+            authStopped = true;
+            updated.push({ ...job, status: 'pending', lastError: 'Session expired — re-authenticate first' });
+            continue;
+          }
+          const d = await res.json().catch(() => ({}));
+          if (res.ok || (res.status === 409 && d.deduplicated)) {
+            syncedNow++;
+            updated.push({ ...job, status: 'synced', syncedAt: new Date().toISOString(), lastError: '' });
+          } else {
+            failedNow++;
+            updated.push({ ...job, status: 'failed', lastError: d.error || `HTTP ${res.status}` });
+          }
+        } catch (err) {
+          failedNow++;
+          updated.push({ ...job, status: 'failed', lastError: (err && err.message) || 'Network unavailable' });
+        }
+      }
+      saveOfflineQueue(updated);
+      const pendingLeft = updated.filter(j => j.status === 'pending').length;
+      return { synced: syncedNow, failed: failedNow, pending: pendingLeft, authStopped };
+    } catch (_) {
+      return { synced: 0, failed: 0, pending: 0, authStopped: false };
+    } finally {
+      setOfflineSyncBusy(false);
+    }
+  };
   const saveEtims = (next) => {
     setEtimsSettings(next);
     apiFetch('/api/tenant-settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ etims: next }) }).catch(() => {});
@@ -2315,12 +2681,13 @@ export default function App() {
     }
     return { ...s, _due: parseFloat(s.balanceDue) || 0, _deadline: deadline, _bucket: bucket };
   }).sort((a, b) => String(a._deadline).localeCompare(String(b._deadline)));
-  const deadStockList = (inventory || []).filter(i => isTrackedInventory(i)).map(item => {
-    const sold = (sales || []).some(s => {
+  const deadStockList = (reportFilteredInventory || []).filter(i => isTrackedInventory(i)).map(item => {
+    const sold = (reportFilteredSales || []).some(s => {
       return parseSaleItems(s).some(ii => ii.id === item.id || ii.name === item.name);
     });
-    const val = (parseFloat(item.quantity) || 0) * (parseFloat(item.cogs) || parseFloat(item.buyingPrice) || parseFloat(item.price) || 0);
-    return { ...item, hasSales: sold, stockValue: val };
+    const locQty = getItemLocationQuantity(item, activeLocKey || 'all');
+    const val = locQty * (parseFloat(item.cogs) || parseFloat(item.buyingPrice) || parseFloat(item.price) || 0);
+    return { ...item, quantity: locQty, hasSales: sold, stockValue: val };
   }).filter(i => !i.hasSales && (parseFloat(i.quantity) || 0) > 0);
   const deadStockValue = deadStockList.reduce((s, i) => s + (i.stockValue || 0), 0);
   const saveCashUps = (next) => {
@@ -2338,7 +2705,7 @@ export default function App() {
     if (days <= 60) return '31_60';
     return '60_plus';
   };
-  const agingSales = (sales || []).filter(s => {
+  const agingSales = (strictBranchSales || []).filter(s => {
     const due = parseFloat(s.balanceDue) || Math.max(0, (parseFloat(s.totalAmount)||0) - (parseFloat(s.paidAmount)||0));
     return due > 0;
   }).map(s => {
@@ -2346,10 +2713,10 @@ export default function App() {
     const bucket = agingBucket(s.deadline || s.dueDate || s.date);
     return { kind: 'sale', id: s.id, party: s.customerName, type: s.saleType || s.type, due, date: s.date, deadline: s.deadline || s.dueDate, bucket };
   });
-  const agingPOs = (purchaseOrders || []).filter(po => (parseFloat(po.balanceDue) || 0) > 0).map(po => ({
+  const agingPOs = (strictBranchPOs || []).filter(po => (parseFloat(po.balanceDue) || 0) > 0).map(po => ({
     kind: 'purchase', id: po.id, party: po.supplierName, type: po.workflowStatus, due: parseFloat(po.balanceDue) || 0, date: po.date, deadline: po.expectedDate || po.date, bucket: agingBucket(po.expectedDate || po.date)
   }));
-  const agingExpenses = (expenses || []).filter(e => (parseFloat(e.balanceDue) || 0) > 0 || (e.paymentStatus && e.paymentStatus !== 'Paid')).map(e => {
+  const agingExpenses = (strictBranchExpenses || []).filter(e => (parseFloat(e.balanceDue) || 0) > 0 || (e.paymentStatus && e.paymentStatus !== 'Paid')).map(e => {
     const due = parseFloat(e.balanceDue) || Math.max(0, (parseFloat(e.amount)||0) - (parseFloat(e.paidAmount)||0));
     if (due <= 0) return null;
     return { kind: 'expense', id: e.id, party: e.paidTo || e.category, type: e.category, due, date: e.date, deadline: e.date, bucket: agingBucket(e.date) };
@@ -2385,7 +2752,7 @@ export default function App() {
   });
   const payrollStatutorySummary = (() => {
     let paye = 0, nssf = 0, sha = 0;
-    (payrollRecords || []).forEach(p => {
+    (strictBranchPayrollRecords || []).forEach(p => {
       let d = p.deductionItems;
       if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { d = {}; } }
       d = d || {};
@@ -2419,17 +2786,21 @@ export default function App() {
   // Category Breakdown for Reports
   const reportCategoryMap = {};
   reportFilteredSales.forEach(s => {
+    const taxRate = Number(s.taxRate) || 0;
     parseSaleItems(s).forEach(i => {
       const cat = i.category || 'Uncategorized';
       if (!reportCategoryMap[cat]) {
         reportCategoryMap[cat] = { category: cat, totalSales: 0, totalCogs: 0, qty: 0 };
       }
-      const qty = i.qty || 1;
-      const rev = i.price * qty;
-      const cogs = (Number(i.cogs) || 0) * qty;
+      const origQty = Number(i.qty ?? i.quantity) || 0;
+      const netQty = Math.max(0, origQty - (Number(i.returnedQty) || 0));
+      const cogsQty = Math.max(0, origQty - (Number(i.returnedSaleableQty) || 0));
+      const rawRev = (Number(i.price) || 0) * netQty;
+      const rev = (s.taxInclusive && taxRate > 0) ? (rawRev / (1 + taxRate / 100)) : rawRev;
+      const cogs = (Number(i.cogs != null && i.cogs !== '' ? i.cogs : i.buyingPrice) || 0) * cogsQty;
       reportCategoryMap[cat].totalSales += rev;
       reportCategoryMap[cat].totalCogs += cogs;
-      reportCategoryMap[cat].qty += qty;
+      reportCategoryMap[cat].qty += netQty;
     });
   });
   const reportCategoriesList = Object.values(reportCategoryMap).map(c => ({
@@ -2513,12 +2884,12 @@ export default function App() {
       alert(`Cannot sell "${item.name}" because its current status ("${item.status}") restricts sales!`);
       return;
     }
-    // Prefer live inventory qty (cart rows can hold a stale snapshot)
+    // Prefer live inventory qty for current location (cart rows can hold a stale snapshot)
     const live = (inventory || []).find(x => x.id === item.id) || item;
     const tracked = isTrackedInventory(live) || isTrackedInventory(item);
-    const available = Number(live.quantity) || 0;
+    const available = getItemLocationQuantity(live, activeBranchId);
     if (tracked && available <= 0) {
-      alert(`Cannot sell "${item.name}" because stock level is 0!`);
+      alert(`Cannot sell "${item.name}" because stock level is 0 at this location!`);
       return;
     }
 
@@ -2527,7 +2898,7 @@ export default function App() {
       const updated = [...posCart];
       const currentCartQty = updated[existingIndex].cartQty || 1;
       if (tracked && currentCartQty >= available) {
-        alert(`Cannot add more "${item.name}". Stock limit reached.`);
+        alert(`Cannot add more "${item.name}". Stock limit reached for this location.`);
         return;
       }
       updated[existingIndex] = { ...updated[existingIndex], cartQty: currentCartQty + 1, quantity: available };
@@ -2542,7 +2913,16 @@ export default function App() {
     setPosCart(posCart.filter(i => i.id !== id));
   };
 
+  useEffect(() => {
+    if (!posCart.length) posCheckoutIdemKeyRef.current = '';
+  }, [posCart.length]);
+
   const handleCheckout = async () => {
+    if (sessionExpiredModalOpen) {
+      alert('Session expired — please sign in again before completing this sale.');
+      return;
+    }
+    if (posCheckoutLockRef.current) return;
     if (posCart.length === 0) return;
     if (!posSelectedCustomer) {
       alert('Please select a customer for this transaction. Customer selection is mandatory to complete sale in POS.');
@@ -2574,8 +2954,13 @@ export default function App() {
     const maxPtsByTotal = valuePerPoint > 0 ? Math.floor(cartTotal / valuePerPoint) : 0;
     if (redeemPts > maxPtsByTotal) redeemPts = maxPtsByTotal;
     const redeemCredit = Math.round(redeemPts * valuePerPoint * 100) / 100;
-    const totalPaidNum = cashPaidNum + mpesaPaidNum + bankPaidNum + redeemCredit;
+
+    const custAcctCredit = parseFloat(customerObj?.creditBalance) || 0;
+    const acctCreditUsed = Math.round(Math.min(custAcctCredit, Math.max(0, cartTotal - redeemCredit), Math.max(0, parseFloat(posAccountCreditUsed) || 0)) * 100) / 100;
+
+    const totalPaidNum = cashPaidNum + mpesaPaidNum + bankPaidNum + redeemCredit + acctCreditUsed;
     const balanceAmt = Math.max(0, cartTotal - totalPaidNum);
+    let excessCreditAmt = 0;
 
     const allowedEligibility = customerObj?.eligibility || ['Paid', 'Credit', 'Layby'];
     const eligList = Array.isArray(allowedEligibility) ? allowedEligibility : ['Paid'];
@@ -2640,195 +3025,284 @@ export default function App() {
       }
     }
 
-    // Never accept payment above the sale total
+    // Handle overpayment: offer to credit excess to customer's account creditBalance
     if (totalPaidNum > cartTotal + 0.009) {
-      alert(`Payment cannot exceed the sale total.\nSale total: ${(shopProfile.currency || '')} ${cartTotal.toLocaleString()}\nEntered: ${(shopProfile.currency || '')} ${totalPaidNum.toLocaleString()}\nPlease adjust Cash / M-Pesa / Bank Transfer so the total paid equals the sale amount (or less for credit/layby).`);
-      return;
+      const overAmt = Math.round((totalPaidNum - cartTotal) * 100) / 100;
+      const curr = shopProfile.currency || 'KSh';
+      const creditToAccount = window.confirm(
+        `Payment entered (${curr} ${totalPaidNum.toLocaleString()}) exceeds the sale total (${curr} ${cartTotal.toLocaleString()}) by ${curr} ${overAmt.toLocaleString()}.\n\n` +
+        `Click OK to credit ${curr} ${overAmt.toLocaleString()} into ${posSelectedCustomer}'s account credit balance, or Cancel to adjust payment.`
+      );
+      if (!creditToAccount) return;
+      excessCreditAmt = overAmt;
     }
 
-    if (posSaleType === 'Paid' && balanceAmt > 0.009) {
+    const effectiveSaleType = balanceAmt === 0 ? 'Paid' : posSaleType;
+
+    if (effectiveSaleType === 'Paid' && balanceAmt > 0.009) {
       alert(`Paid sales require full payment. Balance due would be ${(shopProfile.currency || '')} ${balanceAmt.toLocaleString()}.`);
       return;
     }
 
-    if (posSaleType !== 'Paid' && balanceAmt === 0) {
+    if (posSaleType !== 'Paid' && balanceAmt === 0 && excessCreditAmt === 0) {
       alert(`Selected sale type is ${posSaleType}, but balance due is 0. Please adjust payments or select Paid.`);
       return;
     }
 
-    if (posSaleType !== 'Paid' && !posDeadline) {
+    if (effectiveSaleType !== 'Paid' && !posDeadline) {
       alert('Please select a deadline date for Credit or Layby orders.');
       return;
     }
 
-    const payParts = [];
-    if (cashPaidNum > 0) payParts.push(`Cash (${cashPaidNum})`);
-    if (mpesaPaidNum > 0) payParts.push(`M-Pesa (${mpesaPaidNum})`);
-    if (bankPaidNum > 0) payParts.push(`Bank Transfer (${bankPaidNum})`);
-    if (redeemCredit > 0) payParts.push(`Loyalty Points (${redeemCredit})`);
-    let paymentMethodStr = 'Cash';
-    if (payParts.length === 1) {
-      if (bankPaidNum > 0) paymentMethodStr = 'Bank Transfer';
-      else if (mpesaPaidNum > 0) paymentMethodStr = 'M-Pesa';
-      else if (cashPaidNum > 0) paymentMethodStr = 'Cash';
-      else if (redeemCredit > 0) paymentMethodStr = 'Loyalty Points';
-    } else if (payParts.length > 1) {
-      paymentMethodStr = payParts.join(' + ');
-    }
-
-    const finalDateObj = posSaleDate ? new Date(`${posSaleDate}T${new Date().toTimeString().split(' ')[0]}`).toISOString() : new Date().toISOString();
-
-    const resolvedMpesaCode = mpesaPaidNum > 0 ? (posMpesaCode || 'MPESA' + Math.floor(Math.random() * 899999 + 100000)) : 'N/A';
-    const resolvedBankRef = bankPaidNum > 0 ? (posBankRef || 'BNK' + Math.floor(Math.random() * 899999 + 100000)) : '';
-    const initialSalePaid = Math.min(totalPaidNum, cartTotal);
-    const initialPaymentHistory = initialSalePaid > 0 ? [{
-      id: `spay-${Date.now()}`,
-      date: finalDateObj,
-      amount: initialSalePaid,
-      paymentMethod: paymentMethodStr,
-      mpesaCode: mpesaPaidNum > 0 ? resolvedMpesaCode : '',
-      bankRef: bankPaidNum > 0 ? resolvedBankRef : ''
-    }] : [];
-
-    const newSale = {
-      id: `tx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      branchId: activeBranchId || undefined,
-      date: finalDateObj,
-      customerId: customerObj?.id || '',
-      customerName: posSelectedCustomer,
-      saleType: posSaleType,
-      items: JSON.stringify(posCart.map(i => ({ id: i.id, name: formatItemDisplayName(i), price: i.price, cogs: Math.max(0, Number(i.buyingPrice) || 0), category: i.category, trackInventory: isTrackedInventory(i), qty: i.cartQty, returnedQty: 0, returnedSaleableQty: 0 }))),
-      totalAmount: cartTotal,
-      subtotal: cartSubtotal,
-      taxAmount: Math.round(salesTaxAmt * 100) / 100,
-      taxRate: applySalesTax ? taxSettings.salesTaxRate : 0,
-      taxName: taxSettings.salesTaxName || 'VAT',
-      taxInclusive: !!posTaxInclusive,
-      paymentMethod: paymentMethodStr,
-      mpesaCode: resolvedMpesaCode,
-      paymentHistory: initialPaymentHistory,
-      cashier: currentUser?.name || 'Staff',
-      createdBy: currentUser?.name || currentUser?.id || 'Staff',
-      paidAmount: initialSalePaid,
-      balanceDue: Math.max(0, cartTotal - initialSalePaid),
-      cashPaid: cashPaidNum,
-      mpesaPaid: mpesaPaidNum,
-      bankPaid: bankPaidNum,
-      bankRef: resolvedBankRef,
-      deadline: posDeadline || new Date().toISOString().split('T')[0],
-      priceList: posPriceList || 'retail',
-      buyerPin: customerObj?.kraPin || '',
-      invoiceNo: etimsSettings.enabled
-        ? `${etimsSettings.invoicePrefix || 'INV'}-${String(etimsSettings.nextInvoiceNo || 1).padStart(5, '0')}`
-        : undefined,
-      loyaltyPointsEarned: loyaltySettings.enabled
-        ? Math.floor(Math.max(0, cashPaidNum + mpesaPaidNum) * (parseFloat(loyaltySettings.pointsPerCurrency) || 1))
-        : 0,
-      loyaltyPointsRedeemed: redeemPts,
-      loyaltyRedeemCredit: redeemCredit
-    };
-
-    // Pre-check stock against live inventory before optimistic update
+    // Pre-check stock against live inventory at active location before acquiring submit lock
     for (const ci of posCart) {
       if (!isTrackedInventory(ci)) continue;
       const live = (inventory || []).find(x => x.id === ci.id);
-      const avail = live != null ? Number(live.quantity) || 0 : Number(ci.quantity) || 0;
+      const avail = live != null ? getItemLocationQuantity(live, activeBranchId) : Number(ci.quantity) || 0;
       if ((Number(ci.cartQty) || 0) > avail) {
-        alert(`Insufficient stock for ${ci.name || ci.id}. Available: ${avail}; in cart: ${ci.cartQty}.`);
+        alert(`Insufficient stock at this location for ${ci.name || ci.id}. Available: ${avail}; in cart: ${ci.cartQty}.`);
         return;
       }
     }
 
-    const saleRecord = { ...newSale, items: JSON.parse(newSale.items), paymentHistory: initialPaymentHistory };
-    // Server-first: only update local state after DB accepts the sale
-    let serverOk = false;
-    let serverMsg = '';
-    let serverCustomerLoyalty = null;
+    // Acquire double-submit guard & idempotency key after all validation passes
+    posCheckoutLockRef.current = true;
+    setPosCheckoutBusy(true);
+    if (!posCheckoutIdemKeyRef.current) {
+      posCheckoutIdemKeyRef.current = `idem-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+    const idempotencyKey = posCheckoutIdemKeyRef.current;
+
     try {
-      const res = await apiFetch('/api/sales', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newSale)
-      });
-      if (res.ok) {
-        serverOk = true;
-        try {
-          const d = await res.json();
-          if (d && d.journalId) serverMsg = 'Ledger journal: ' + d.journalId;
-          if (d && d.customerLoyalty) serverCustomerLoyalty = d.customerLoyalty;
-        } catch (_) {}
-      } else {
-        try { const d = await res.json(); serverMsg = d.error || ('HTTP ' + res.status); } catch (_) { serverMsg = 'HTTP ' + res.status; }
+      const payParts = [];
+      if (cashPaidNum > 0) payParts.push(`Cash (${cashPaidNum})`);
+      if (mpesaPaidNum > 0) payParts.push(`M-Pesa (${mpesaPaidNum})`);
+      if (bankPaidNum > 0) payParts.push(`Bank Transfer (${bankPaidNum})`);
+      if (acctCreditUsed > 0) payParts.push(`Account Credit (${acctCreditUsed})`);
+      if (redeemCredit > 0) payParts.push(`Loyalty Points (${redeemCredit})`);
+      let paymentMethodStr = 'Cash';
+      if (payParts.length === 1) {
+        if (bankPaidNum > 0) paymentMethodStr = 'Bank Transfer';
+        else if (mpesaPaidNum > 0) paymentMethodStr = 'M-Pesa';
+        else if (cashPaidNum > 0) paymentMethodStr = 'Cash';
+        else if (acctCreditUsed > 0) paymentMethodStr = 'Account Credit';
+        else if (redeemCredit > 0) paymentMethodStr = 'Loyalty Points';
+      } else if (payParts.length > 1) {
+        paymentMethodStr = payParts.join(' + ');
       }
-    } catch (e) {
-      serverMsg = (e && e.message) || 'Network error';
-      // Offline queue — still apply locally
+
+      const finalDateObj = posSaleDate ? new Date(`${posSaleDate}T${new Date().toTimeString().split(' ')[0]}`).toISOString() : new Date().toISOString();
+
+      const resolvedMpesaCode = mpesaPaidNum > 0 ? (posMpesaCode || 'MPESA' + Math.floor(Math.random() * 899999 + 100000)) : 'N/A';
+      const resolvedBankRef = bankPaidNum > 0 ? (posBankRef || 'BNK' + Math.floor(Math.random() * 899999 + 100000)) : '';
+      const initialSalePaid = Math.min(totalPaidNum, cartTotal);
+      const initialPaymentHistory = initialSalePaid > 0 ? [{
+        id: `spay-${Date.now()}`,
+        date: finalDateObj,
+        amount: initialSalePaid,
+        paymentMethod: paymentMethodStr,
+        mpesaCode: mpesaPaidNum > 0 ? resolvedMpesaCode : '',
+        bankRef: bankPaidNum > 0 ? resolvedBankRef : ''
+      }] : [];
+
+      const newSale = {
+        id: `tx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        idempotencyKey,
+        branchId: activeBranchId || undefined,
+        date: finalDateObj,
+        customerId: customerObj?.id || '',
+        customerName: posSelectedCustomer,
+        saleType: effectiveSaleType,
+        items: JSON.stringify(posCart.map(i => ({ id: i.id, name: formatItemDisplayName(i), price: i.price, cogs: Math.max(0, Number(i.buyingPrice) || 0), category: i.category, trackInventory: isTrackedInventory(i), qty: i.cartQty, returnedQty: 0, returnedSaleableQty: 0 }))),
+        totalAmount: cartTotal,
+        subtotal: cartSubtotal,
+        taxAmount: Math.round(salesTaxAmt * 100) / 100,
+        taxRate: applySalesTax ? taxSettings.salesTaxRate : 0,
+        taxName: taxSettings.salesTaxName || 'VAT',
+        taxInclusive: !!posTaxInclusive,
+        paymentMethod: paymentMethodStr,
+        mpesaCode: resolvedMpesaCode,
+        paymentHistory: initialPaymentHistory,
+        cashier: currentUser?.name || 'Staff',
+        createdBy: currentUser?.name || currentUser?.id || 'Staff',
+        paidAmount: initialSalePaid,
+        balanceDue: Math.max(0, cartTotal - initialSalePaid),
+        cashPaid: cashPaidNum,
+        mpesaPaid: mpesaPaidNum,
+        bankPaid: bankPaidNum,
+        bankRef: resolvedBankRef,
+        accountCreditUsed: acctCreditUsed,
+        excessCredit: excessCreditAmt,
+        deadline: posDeadline || new Date().toISOString().split('T')[0],
+        priceList: posPriceList || 'retail',
+        buyerPin: customerObj?.kraPin || '',
+        invoiceNo: etimsSettings.enabled
+          ? `${etimsSettings.invoicePrefix || 'INV'}-${String(etimsSettings.nextInvoiceNo || 1).padStart(5, '0')}`
+          : undefined,
+        loyaltyPointsEarned: loyaltySettings.enabled
+          ? Math.floor(Math.max(0, cashPaidNum + mpesaPaidNum) * (parseFloat(loyaltySettings.pointsPerCurrency) || 1))
+          : 0,
+        loyaltyPointsRedeemed: redeemPts,
+        loyaltyRedeemCredit: redeemCredit
+      };
+
+      const saleRecord = { ...newSale, items: JSON.parse(newSale.items), paymentHistory: initialPaymentHistory };
+      let serverOk = false;
+      let serverMsg = '';
+      let serverStatus = 0;
+      let serverCustomerLoyalty = null;
+      let serverCustomerCredit = null;
+      let serverSale = null;
+      let deduplicated = false;
       try {
-        const q = [...(JSON.parse(localStorage.getItem('erp_offline_queue') || '[]')), { type: 'sale', payload: newSale, at: new Date().toISOString() }];
-        saveOfflineQueue(q);
-      } catch (_) {}
-      serverOk = true; // allow local completion when offline
-      serverMsg = (serverMsg ? serverMsg + ' — ' : '') + 'Saved offline; will sync later.';
-    }
-    if (!serverOk) {
-      alert('Sale not posted: ' + (serverMsg || 'Unknown error'));
-      return;
-    }
-    const updatedInventory = inventory.map(item => {
-      const cartItem = posCart.find(ci => ci.id === item.id);
-      if (cartItem && isTrackedInventory(item)) {
-        const newQty = Math.max(0, (Number(item.quantity) || 0) - (Number(cartItem.cartQty) || 0));
-        return { ...item, quantity: newQty, status: newQty === 0 ? 'Sold' : item.status };
-      }
-      return item;
-    });
-    setInventory(updatedInventory);
-    const nextSales = [saleRecord, ...sales];
-    setSales(nextSales);
-    if (initialSalePaid > 0) {
-      logAudit('payment', 'sales', `${newSale.id} · ${shopProfile.currency} ${initialSalePaid} via ${paymentMethodStr} (${posSelectedCustomer})`);
-    }
-    // Stock movement history (server + local)
-    try {
-      posCart.forEach(ci => {
-        if (isTrackedInventory(ci)) {
-          logStock(ci.id, formatItemDisplayName(ci), -(Number(ci.cartQty) || 0), 'Sale', newSale.id, activeBranchId && activeBranchId !== 'all' ? activeBranchId : '');
+        const res = await apiFetch('/api/sales', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newSale)
+        });
+        serverStatus = res.status;
+        if (res.ok) {
+          serverOk = true;
+          try {
+            const d = await res.json();
+            if (d && d.journalId) serverMsg = 'Ledger journal: ' + d.journalId;
+            if (d && d.customerLoyalty) serverCustomerLoyalty = d.customerLoyalty;
+            if (d && d.customerCredit) serverCustomerCredit = d.customerCredit;
+            if (d && d.sale) serverSale = d.sale;
+            if (d && d.deduplicated) deduplicated = true;
+          } catch (_) {}
+        } else {
+          try { const d = await res.json(); serverMsg = d.error || ('HTTP ' + res.status); } catch (_) { serverMsg = 'HTTP ' + res.status; }
         }
-      });
-    } catch (_) {}
-    setLastCompletedSale({ ...newSale, items: posCart });
-    setReceiptModalOpen(true);
-    setPosCart([]);
-    setPosCashPaid('');
-    setPosMpesaPaid('');
-    setPosMpesaCode('');
-    setPosBankPaid('');
-    setPosBankRef('');
-    setPosSelectedCustomer('');
-    setPosSaleType('Paid');
-    setPosSaleDate(new Date().toISOString().split('T')[0]);
-    setPosDeadline('');
-    setPosRedeemPoints('');
-    if (etimsSettings.enabled) {
-      const nextE = { ...etimsSettings, nextInvoiceNo: (parseInt(etimsSettings.nextInvoiceNo) || 1) + 1 };
-      saveEtims(nextE);
-    }
-    if (loyaltySettings.enabled && customerObj) {
-      const earned = newSale.loyaltyPointsEarned || 0;
-      const redeemed = newSale.loyaltyPointsRedeemed || 0;
-      if (earned > 0 || redeemed > 0 || serverCustomerLoyalty) {
-        const pts = serverCustomerLoyalty && typeof serverCustomerLoyalty.loyaltyPoints === 'number'
-          ? serverCustomerLoyalty.loyaltyPoints
-          : Math.max(0, (parseFloat(customerObj.loyaltyPoints) || 0) + earned - redeemed);
-        const upd = { ...customerObj, loyaltyPoints: pts };
-        setCustomers(customers.map(c => c.id === customerObj.id ? upd : c));
+      } catch (e) {
+        serverMsg = (e && e.message) || 'Network error';
+        try {
+          const curQ = JSON.parse(localStorage.getItem('erp_offline_queue') || '[]');
+          const queuedJob = {
+            id: `oq-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            type: 'sale',
+            payload: newSale,
+            at: new Date().toISOString(),
+            status: 'pending',
+            lastError: serverMsg
+          };
+          saveOfflineQueue([...(Array.isArray(curQ) ? curQ : []), queuedJob]);
+        } catch (_) {}
+        posCheckoutIdemKeyRef.current = '';
+        serverOk = true;
+        serverMsg = (serverMsg ? serverMsg + ' — ' : '') + 'Saved offline; will sync later.';
       }
+      if (serverStatus === 401) {
+        return;
+      }
+      if (!serverOk) {
+        alert('Sale not posted: ' + (serverMsg || 'Unknown error'));
+        return;
+      }
+      posCheckoutIdemKeyRef.current = '';
+      if (deduplicated) {
+        alert('This sale was already posted (duplicate submission prevented).');
+      }
+      const updatedInventory = inventory.map(item => {
+        const cartItem = posCart.find(ci => ci.id === item.id);
+        if (cartItem && isTrackedInventory(item)) {
+          const deduct = Number(cartItem.cartQty) || 0;
+          const lq = { ...parseLocationQuantities(item) };
+          const brKey = activeBranchId && activeBranchId !== 'all' ? activeBranchId : '';
+          if (brKey && (isItemInAllLocations(item) || parseAllowedBranches(item).length > 0 || Object.keys(lq).length > 0)) {
+            const curLoc = getItemLocationQuantity(item, brKey);
+            lq[brKey] = Math.max(0, curLoc - deduct);
+            const nextTotal = Object.keys(lq).length > 0
+              ? Object.values(lq).reduce((s, v) => s + Math.max(0, Number(v) || 0), 0)
+              : Math.max(0, (Number(item.quantity) || 0) - deduct);
+            return { ...item, quantity: nextTotal, locationQuantities: lq, status: nextTotal === 0 ? 'Sold' : item.status };
+          }
+          const newQty = Math.max(0, (Number(item.quantity) || 0) - deduct);
+          return { ...item, quantity: newQty, status: newQty === 0 ? 'Sold' : item.status };
+        }
+        return item;
+      });
+      setInventory(updatedInventory);
+      const finalRecord = serverSale
+        ? { ...saleRecord, ...serverSale, items: typeof serverSale.items === 'string' ? JSON.parse(serverSale.items || '[]') : (serverSale.items || saleRecord.items), paymentHistory: initialPaymentHistory }
+        : saleRecord;
+      const nextSales = [finalRecord, ...(sales || []).filter(s => s.id !== finalRecord.id)];
+      setSales(nextSales);
+      if (initialSalePaid > 0 && !deduplicated) {
+        logAudit('payment', 'sales', `${finalRecord.id} · ${shopProfile.currency} ${initialSalePaid} via ${paymentMethodStr} (${posSelectedCustomer})${excessCreditAmt > 0 ? ` · Excess +${shopProfile.currency} ${excessCreditAmt} credited to account` : ''}`);
+      }
+      if (!deduplicated) {
+        try {
+          posCart.forEach(ci => {
+            if (isTrackedInventory(ci)) {
+              logStock(ci.id, formatItemDisplayName(ci), -(Number(ci.cartQty) || 0), 'Sale', finalRecord.id, activeBranchId && activeBranchId !== 'all' ? activeBranchId : '');
+            }
+          });
+        } catch (_) {}
+      }
+      setLastCompletedSale({ ...finalRecord, items: posCart });
+      setReceiptModalOpen(true);
+      setPosCart([]);
+      setPosCashPaid('');
+      setPosMpesaPaid('');
+      setPosMpesaCode('');
+      setPosBankPaid('');
+      setPosBankRef('');
+      setPosAccountCreditUsed('');
+      setPosSelectedCustomer('');
+      setPosSaleType('Paid');
+      setPosSaleDate(new Date().toISOString().split('T')[0]);
+      setPosDeadline('');
+      setPosRedeemPoints('');
+      if (etimsSettings.enabled && !deduplicated) {
+        const nextE = { ...etimsSettings, nextInvoiceNo: (parseInt(etimsSettings.nextInvoiceNo) || 1) + 1 };
+        saveEtims(nextE);
+      }
+      if (customerObj) {
+        const ptsChanged = loyaltySettings.enabled && ((newSale.loyaltyPointsEarned || 0) > 0 || (newSale.loyaltyPointsRedeemed || 0) > 0 || serverCustomerLoyalty);
+        const credChanged = acctCreditUsed > 0 || excessCreditAmt > 0 || serverCustomerCredit;
+        if (ptsChanged || credChanged) {
+          const nextPts = serverCustomerLoyalty && typeof serverCustomerLoyalty.loyaltyPoints === 'number'
+            ? serverCustomerLoyalty.loyaltyPoints
+            : Math.max(0, (parseFloat(customerObj.loyaltyPoints) || 0) + (newSale.loyaltyPointsEarned || 0) - (newSale.loyaltyPointsRedeemed || 0));
+          const nextCred = serverCustomerCredit && typeof serverCustomerCredit.creditBalance === 'number'
+            ? serverCustomerCredit.creditBalance
+            : Math.round(Math.max(0, custAcctCredit - acctCreditUsed + excessCreditAmt) * 100) / 100;
+          const upd = { ...customerObj, loyaltyPoints: nextPts, creditBalance: nextCred };
+          setCustomers(customers.map(c => c.id === customerObj.id ? upd : c));
+        }
+      }
+    } finally {
+      posCheckoutLockRef.current = false;
+      setPosCheckoutBusy(false);
     }
   };
 
   const handleSaveNewItem = async (e) => {
     e.preventDefault();
     if (!itemForm.name || !itemForm.price) return;
+    const mode = itemForm.locationMode || (itemForm.allLocations ? 'all' : ((itemForm.allowedBranches || []).length > 0 ? 'multi' : 'single'));
+    const isAllLoc = mode === 'all';
+    const allowedBrs = mode === 'multi' ? (itemForm.allowedBranches || []).map(String).filter(Boolean) : [];
+    if (mode === 'multi' && allowedBrs.length === 0) {
+      alert('Please select at least one location for this item, or choose "All locations".');
+      return;
+    }
+    const rawLocQ = itemForm.locationQuantities && typeof itemForm.locationQuantities === 'object' ? itemForm.locationQuantities : {};
+    const cleanLocQ = {};
+    if (mode === 'all') {
+      (accessibleBranches || branches || []).forEach(b => {
+        cleanLocQ[b.id] = itemForm.trackInventory ? Math.max(0, parseInt(rawLocQ[b.id], 10) || 0) : 999;
+      });
+    } else if (mode === 'multi') {
+      allowedBrs.forEach(bid => {
+        cleanLocQ[bid] = itemForm.trackInventory ? Math.max(0, parseInt(rawLocQ[bid], 10) || 0) : 999;
+      });
+    }
+    const totalQty = (mode === 'all' || mode === 'multi')
+      ? (itemForm.trackInventory ? Object.values(cleanLocQ).reduce((s, v) => s + (Number(v) || 0), 0) : 999)
+      : (itemForm.trackInventory ? (parseInt(itemForm.quantity, 10) || 0) : 999);
+
     const vv = { ...(itemForm.varianceValues || {}) };
     (itemVariances || []).forEach(v => {
       if (v && v.name && vv[v.name] == null) vv[v.name] = '';
@@ -2837,7 +3311,10 @@ export default function App() {
     const newItem = {
       id: `item-${Date.now()}`,
       createdBy: currentUser?.name || currentUser?.id || '',
-      branchId: itemForm.allLocations ? '' : (itemForm.branchId || activeBranchId || undefined),
+      branchId: (mode === 'all' || mode === 'multi') ? '' : (itemForm.branchId || activeBranchId || ''),
+      allLocations: isAllLoc,
+      allowedBranches: allowedBrs,
+      locationQuantities: cleanLocQ,
       name: itemForm.name,
       sku: (itemForm.sku || '').trim(),
       size: withVar.size || '',
@@ -2846,7 +3323,8 @@ export default function App() {
       category: itemForm.category,
       buyingPrice: parseFloat(itemForm.buyingPrice) || 0,
       price: parseFloat(itemForm.price),
-      quantity: itemForm.trackInventory ? parseInt(itemForm.quantity) || 0 : 999,
+      wholesalePrice: parseFloat(itemForm.wholesalePrice) || 0,
+      quantity: totalQty,
       lowStockAlert: parseInt(itemForm.lowStockAlert) || 3,
       trackInventory: itemForm.trackInventory ? 1 : 0,
       status: itemForm.status,
@@ -2861,7 +3339,7 @@ export default function App() {
       });
       if (res.ok) {
         setInventory([newItem, ...inventory]);
-        setItemForm({ name: '', sku: '', size: '', colour: '', wholesalePrice: '', category: 'Grade A Jackets', buyingPrice: '', price: '', quantity: '', lowStockAlert: 3, trackInventory: true, status: 'Listed', photoUrl: '', varianceValues: {}, branchId: '', allLocations: false });
+        setItemForm({ name: '', sku: '', size: '', colour: '', wholesalePrice: '', category: 'Grade A Jackets', buyingPrice: '', price: '', quantity: '', lowStockAlert: 3, trackInventory: true, status: 'Listed', photoUrl: '', varianceValues: {}, branchId: '', allLocations: false, locationMode: 'single', allowedBranches: [], locationQuantities: {} });
         setDuplicatingItemName('');
         setNewItemModalOpen(false);
       } else {
@@ -2875,6 +3353,9 @@ export default function App() {
   const handleDuplicateItem = (item) => {
     if (!item) return;
     const vv = parseItemVarianceValues(item) || item.varianceValues || {};
+    const allowedBrs = parseAllowedBranches(item);
+    const isAll = isItemInAllLocations(item);
+    const locMode = isAll ? 'all' : (allowedBrs.length > 0 ? 'multi' : 'single');
     setItemForm({
       name: `${item.name} (Copy)`,
       sku: item.sku ? `${item.sku}-COPY` : '',
@@ -2891,7 +3372,10 @@ export default function App() {
       photoUrl: item.photoUrl || '',
       varianceValues: { ...vv },
       branchId: item.branchId || '',
-      allLocations: !item.branchId
+      allLocations: isAll,
+      locationMode: locMode,
+      allowedBranches: [...allowedBrs],
+      locationQuantities: { ...parseLocationQuantities(item) }
     });
     setDuplicatingItemName(item.name || '');
     setSelectedInventoryItem(null);
@@ -2909,7 +3393,8 @@ export default function App() {
       ...customerForm,
       branchId: customerForm.allLocations ? '' : (customerForm.branchId || activeBranchId || undefined),
       allLocations: !!customerForm.allLocations,
-      creditLimit: parseFloat(customerForm.creditLimit) || 0
+      creditLimit: parseFloat(customerForm.creditLimit) || 0,
+      creditBalance: parseFloat(customerForm.creditBalance) || 0
     };
 
     try {
@@ -2920,7 +3405,7 @@ export default function App() {
       });
       if (res.ok) {
         setCustomers([newCust, ...customers]);
-        setCustomerForm({ name: '', phone: '', location: '', eligibility: ['Paid'], salesTermId: '', paymentTerm: '', tags: '', priceList: 'retail', kraPin: '', loyaltyPoints: 0, creditLimit: 0, branchId: '', allLocations: true });
+        setCustomerForm({ name: '', phone: '', location: '', eligibility: ['Paid'], salesTermId: '', paymentTerm: '', tags: '', priceList: 'retail', kraPin: '', loyaltyPoints: 0, creditLimit: 0, creditBalance: 0, branchId: '', allLocations: true });
         setNewCustomerModalOpen(false);
       } else {
         alert('Failed to add customer to database.');
@@ -2942,7 +3427,7 @@ export default function App() {
     setEmployees(next);
     setEmployeeModalOpen(false);
     setSelectedEmployee(null);
-    setEmployeeForm({ name: '', position: '', department: (hrSettings.departments && hrSettings.departments[0]) || 'Sales', phone: '', email: '', hireDate: '', salary: '', status: 'Active', nationalId: '', bankAccount: '', bankName: '', leaveBalance: hrSettings.defaultAnnualLeave || 21, managerId: '' });
+    setEmployeeForm({ name: '', position: '', department: (hrSettings.departments && hrSettings.departments[0]) || 'Sales', phone: '', email: '', hireDate: '', salary: '', status: 'Active', nationalId: '', bankAccount: '', bankName: '', leaveBalance: hrSettings.defaultAnnualLeave || 21, managerId: '', branchId: '' });
     try {
       const method = isUpdate ? 'PUT' : 'POST';
       const url = isUpdate ? `/api/employees/${emp.id}` : '/api/employees';
@@ -2961,7 +3446,8 @@ export default function App() {
         bankName: emp.bankName || '',
         leaveBalance: parseFloat(emp.leaveBalance) ?? 21,
         managerId: emp.managerId || '',
-        branchId: emp.branchId || activeBranchId || undefined
+        userId: emp.userId || '',
+        branchId: emp.branchId || strictActiveBranchId || activeBranchId || undefined
       };
       const res = await apiFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       if (!res.ok) {
@@ -3014,6 +3500,7 @@ export default function App() {
       id: `leave-${Date.now()}`,
       employeeId: resolvedEmployeeId,
       employeeName: emp?.name || '',
+      branchId: emp?.branchId || strictActiveBranchId || activeBranchId || undefined,
       leaveType: leaveForm.leaveType || 'Annual',
       startDate: leaveForm.startDate,
       endDate: leaveForm.endDate,
@@ -3095,6 +3582,7 @@ export default function App() {
       id: `pay-${Date.now()}`,
       employeeId: emp.id,
       employeeName: emp.name,
+      branchId: emp.branchId || strictActiveBranchId || activeBranchId || undefined,
       period: payrollForm.period,
       createdBy: currentUser?.name || currentUser?.id || '',
       basicSalary: basic,
@@ -3131,6 +3619,7 @@ export default function App() {
     if (net > 0) {
       const exp = {
         id: `exp-payroll-${rec.id}-${Date.now()}`,
+        branchId: rec.branchId || activeBranchId || '',
         date: new Date().toISOString().split('T')[0],
         category: 'Payroll',
         description: `Payroll payment — ${rec.employeeName} (${rec.period})`,
@@ -3380,15 +3869,57 @@ export default function App() {
     }
   };
 
-  const openPurchaseReturn = (po) => {
-    if (!(po.received || ['Received', 'Payment', 'Purchase Return'].includes(po.workflowStatus))) {
-      alert('A purchase return can only be created after the goods have been received.');
+  const openPOReceiveModal = (po) => {
+    if (!po) return;
+    if (po.received || ['Received', 'Purchase Return'].includes(po.workflowStatus)) {
+      alert('This PO has already been fully received.');
       return;
     }
-    const already = po.returnedQty || 0;
-    const maxRet = Math.max(0, (po.quantity || 0) - already);
+    let lines = [];
+    try {
+      const raw = typeof po.items === 'string' ? JSON.parse(po.items || '[]') : (po.items || []);
+      if (Array.isArray(raw) && raw.length) {
+        lines = raw.map(l => ({
+          itemId: l.itemId || '',
+          itemName: l.itemName || '',
+          quantity: Number(l.quantity) || 0,
+          cost: Number(l.cost) || 0,
+          returnedQty: Number(l.returnedQty) || 0,
+          receivedQty: Number(l.receivedQty) || (po.received ? (Number(l.quantity) || 0) : 0)
+        }));
+      }
+    } catch (_) {}
+    if (!lines.length) {
+      lines = [{
+        itemId: po.itemId || '',
+        itemName: po.itemName || '',
+        quantity: Number(po.quantity) || 0,
+        cost: Number(po.cost) || 0,
+        returnedQty: Number(po.returnedQty) || 0,
+        receivedQty: Number(po.receivedQty) || 0
+      }];
+    }
+    const initQtys = {};
+    lines.forEach((ln, idx) => {
+      const rem = Math.max(0, (Number(ln.quantity) || 0) - (Number(ln.returnedQty) || 0) - (Number(ln.receivedQty) || 0));
+      initQtys[idx] = rem;
+    });
+    setPoReceiveLineQtys(initQtys);
+    setPoReceivePO({ ...po, _receiveLines: lines });
+    setPoReceiveModalOpen(true);
+  };
+
+  const openPurchaseReturn = (po) => {
+    const hasReceivedQty = Boolean(po.received || (Number(po.receivedQty) || 0) > 0 || ['Received', 'Partially Received', 'Payment', 'Purchase Return'].includes(po.workflowStatus));
+    if (!hasReceivedQty) {
+      alert('A purchase return can only be created after goods have been received.');
+      return;
+    }
+    const already = Number(po.returnedQty) || 0;
+    const recTotal = po.received ? (Number(po.quantity) || 0) : ((Number(po.receivedQty) || 0) > 0 ? Number(po.receivedQty) : (Number(po.quantity) || 0));
+    const maxRet = Math.max(0, recTotal - already);
     if (maxRet <= 0) {
-      alert('No remaining quantity to return on this PO.');
+      alert('No remaining received quantity to return on this PO.');
       return;
     }
     let lines = [];
@@ -3399,17 +3930,18 @@ export default function App() {
           itemId: l.itemId,
           itemName: l.itemName,
           quantity: Number(l.quantity) || 0,
+          receivedQty: (Number(l.receivedQty) || 0) > 0 ? Number(l.receivedQty) : (po.received ? (Number(l.quantity) || 0) : (raw.length === 1 ? recTotal : 0)),
           cost: Number(l.cost) || 0,
           returnedQty: Number(l.returnedQty) || 0
         }));
       }
     } catch (_) {}
     if (!lines.length) {
-      lines = [{ itemId: po.itemId, itemName: po.itemName, quantity: po.quantity, cost: po.cost, returnedQty: already }];
+      lines = [{ itemId: po.itemId, itemName: po.itemName, quantity: po.quantity, receivedQty: recTotal, cost: po.cost, returnedQty: already }];
     }
     const initQtys = {};
     lines.forEach((ln, idx) => {
-      const max = Math.max(0, (Number(ln.quantity) || 0) - (Number(ln.returnedQty) || 0));
+      const max = Math.max(0, (Number(ln.receivedQty) || 0) - (Number(ln.returnedQty) || 0));
       initQtys[idx] = max;
     });
     setPurchaseReturnLineQtys(initQtys);
@@ -3424,26 +3956,42 @@ export default function App() {
   const handleProcessPurchaseReturn = async () => {
     if (!purchaseReturnPO) return;
     const po = purchaseReturnPO;
-    const already = po.returnedQty || 0;
-    const wasReceived = !!(po.received || ['Received', 'Payment', 'Purchase Return'].includes(po.workflowStatus));
+    const already = Number(po.returnedQty) || 0;
+    const wasReceived = !!(po.received || (Number(po.receivedQty) || 0) > 0 || ['Received', 'Partially Received', 'Payment', 'Purchase Return'].includes(po.workflowStatus));
     if (!wasReceived) {
-      alert('A purchase return can only be created after the goods have been received.');
+      alert('A purchase return can only be created after goods have been received.');
       return;
     }
-    const maxRet = Math.max(0, (Number(po.quantity) || 0) - already);
+    const recTotal = po.received ? (Number(po.quantity) || 0) : ((Number(po.receivedQty) || 0) > 0 ? Number(po.receivedQty) : (Number(po.quantity) || 0));
+    const maxRet = Math.max(0, recTotal - already);
+    const lines = po._returnLines || [];
     let requestedRet = 0;
+    const returnLines = [];
     const lineEntries = Object.entries(purchaseReturnLineQtys || {});
-    if (lineEntries.length) {
+    if (lineEntries.length && lines.length) {
+      lines.forEach((ln, idx) => {
+        const lineCap = Math.max(0, (Number(ln.receivedQty) || 0) - (Number(ln.returnedQty) || 0));
+        const q = Math.min(lineCap, Math.max(0, parseInt(purchaseReturnLineQtys[idx], 10) || 0));
+        if (q > 0) {
+          requestedRet += q;
+          returnLines.push({ itemId: ln.itemId, itemName: ln.itemName, qty: q, cost: Number(ln.cost) || Number(po.cost) || 0 });
+        }
+      });
+    } else if (lineEntries.length) {
       requestedRet = lineEntries.reduce((s, [, v]) => s + (Math.max(0, parseInt(v, 10) || 0)), 0);
     } else {
       requestedRet = Math.max(1, parseInt(purchaseReturnQty, 10) || 0);
     }
     if (maxRet <= 0) {
-      alert('No remaining quantity to return on this PO.');
+      alert('No remaining received quantity to return on this PO.');
       return;
     }
     if (requestedRet <= 0) {
       alert('Enter a valid return quantity.');
+      return;
+    }
+    if (requestedRet > maxRet) {
+      alert(`Cannot return ${requestedRet} unit(s). Only ${maxRet} received unit(s) available to return.`);
       return;
     }
     const payMethod = purchaseReturnRefundMethod || po.paymentMethod || 'Cash';
@@ -3451,7 +3999,9 @@ export default function App() {
     const estVal = Math.round(requestedRet * unitCost * 100) / 100;
     const returnPayload = {
       poId: po.id,
+      branchId: po.branchId || activeBranchId || undefined,
       returnQty: requestedRet,
+      ...(returnLines.length ? { returnLines } : {}),
       settlement: purchaseReturnSettlement,
       paymentMethod: payMethod
     };
@@ -3687,25 +4237,10 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [isLoggedIn, activeTab]);
 
-  // Auto-replay offline sales queue when connectivity returns
+  // Auto-replay offline queue when connectivity returns
   useEffect(() => {
     if (!isLoggedIn) return undefined;
-    const flush = async () => {
-      try {
-        const raw = localStorage.getItem('erp_offline_queue') || '[]';
-        const q = JSON.parse(raw);
-        if (!Array.isArray(q) || !q.length) return;
-        const remaining = [];
-        for (const job of q) {
-          if (job.type !== 'sale' || !job.payload) { remaining.push(job); continue; }
-          try {
-            const res = await apiFetch('/api/sales', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(job.payload) });
-            if (!res.ok && res.status !== 409) remaining.push(job);
-          } catch (e) { remaining.push(job); }
-        }
-        saveOfflineQueue(remaining);
-      } catch (e) {}
-    };
+    const flush = () => { syncOfflineQueue({ onlyFailed: false }); };
     window.addEventListener('online', flush);
     // Attempt once shortly after login
     const t = setTimeout(flush, 2500);
@@ -3883,19 +4418,31 @@ export default function App() {
           const r2 = await apiFetch('/api/all-data');
           if (!r2.ok) { clearTimeout(hydrateTimer); setAppHydrating(false); return; }
           const payload = await r2.json();
-          if (payload && Array.isArray(payload.inventory)) setInventory(payload.inventory);
+          if (payload && Array.isArray(payload.inventory)) setInventory(payload.inventory.map(item => {
+            let lq = item.locationQuantities;
+            if (typeof lq === 'string') { try { lq = JSON.parse(lq); } catch (_) { lq = {}; } }
+            let ab = item.allowedBranches;
+            if (typeof ab === 'string') { try { ab = JSON.parse(ab); } catch (_) { ab = []; } }
+            ab = Array.isArray(ab) ? ab.map(String).filter(Boolean) : [];
+            const rawAllLocations = Boolean(item.rawAllLocations ?? (item.allLocations === true || item.allLocations === 1 || item.branchId === 'all'));
+            const allLoc = Boolean(item.allLocations === true || item.allLocations === 1 || item.branchId === 'all' || (!item.branchId && ab.length === 0));
+            const isLegacyUnassigned = Boolean(item.isLegacyUnassigned ?? (!item.branchId && !rawAllLocations && ab.length === 0));
+            return { ...item, rawAllLocations, allLocations: allLoc, isLegacyUnassigned, allowedBranches: ab, locationQuantities: (lq && typeof lq === 'object' && !Array.isArray(lq)) ? lq : {} };
+          }));
           if (payload && Array.isArray(payload.sales)) setSales(payload.sales.map(s => {
             let ph = s.paymentHistory;
             try { if (typeof ph === 'string') ph = JSON.parse(ph || '[]'); } catch (_) { ph = []; }
             return { ...s, items: typeof s.items === 'string' ? JSON.parse(s.items || '[]') : (s.items || []), paymentHistory: Array.isArray(ph) ? ph : [] };
           }));
-          if (payload && Array.isArray(payload.customers)) setCustomers(payload.customers.map(c => ({ ...c, loyaltyPoints: parseFloat(c.loyaltyPoints) || 0, eligibility: typeof c.eligibility === 'string' ? JSON.parse(c.eligibility || '["Paid"]') : (c.eligibility || ['Paid']) })));
+          if (payload && Array.isArray(payload.customers)) setCustomers(payload.customers.map(c => ({ ...c, loyaltyPoints: parseFloat(c.loyaltyPoints) || 0, creditLimit: parseFloat(c.creditLimit) || 0, creditBalance: parseFloat(c.creditBalance) || 0, eligibility: typeof c.eligibility === 'string' ? JSON.parse(c.eligibility || '["Paid"]') : (c.eligibility || ['Paid']) })));
           if (payload && Array.isArray(payload.purchaseOrders)) setPurchaseOrders(payload.purchaseOrders.map(p => {
             let ph = p.paymentHistory;
             try { if (typeof ph === 'string') ph = JSON.parse(ph || '[]'); } catch (_) { ph = []; }
             let rh = p.returnHistory;
             try { if (typeof rh === 'string') rh = JSON.parse(rh || '[]'); } catch (_) { rh = []; }
-            return { ...p, items: typeof p.items === 'string' ? (() => { try { return JSON.parse(p.items); } catch { return p.items; } })() : p.items, paymentHistory: Array.isArray(ph) ? ph : [], returnHistory: Array.isArray(rh) ? rh : [] };
+            let rcvh = p.receiveHistory;
+            try { if (typeof rcvh === 'string') rcvh = JSON.parse(rcvh || '[]'); } catch (_) { rcvh = []; }
+            return { ...p, receivedQty: Number(p.receivedQty) || 0, receiveHistory: Array.isArray(rcvh) ? rcvh : [], items: typeof p.items === 'string' ? (() => { try { return JSON.parse(p.items); } catch { return p.items; } })() : p.items, paymentHistory: Array.isArray(ph) ? ph : [], returnHistory: Array.isArray(rh) ? rh : [] };
           }));
           if (payload && Array.isArray(payload.users)) setUsers(payload.users);
           if (payload && Array.isArray(payload.roles)) {
@@ -4257,12 +4804,13 @@ export default function App() {
     return allowedBranchIds.includes(String(bid));
   };
   const logAudit = (action, entity, detail) => {
-    const entry = { id: `aud-${Date.now()}-${Math.random().toString(36).slice(2,7)}`, at: new Date().toISOString(), user: currentUser?.name || 'System', action, entity, detail: String(detail || ''), tenantId: (tenantInfo && tenantInfo.id) || '' };
+    const auditBranchId = strictActiveBranchId || activeBranchId || (currentBranchId && currentBranchId !== 'all' ? currentBranchId : '') || '';
+    const entry = { id: `aud-${Date.now()}-${Math.random().toString(36).slice(2,7)}`, at: new Date().toISOString(), user: currentUser?.name || 'System', action, entity, detail: String(detail || ''), branchId: auditBranchId, tenantId: (tenantInfo && tenantInfo.id) || '' };
     setAuditLog(prev => [entry, ...(Array.isArray(prev) ? prev : [])].slice(0, 600));
     apiFetch('/api/audit-append', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, entity, detail: String(detail || '') })
+      body: JSON.stringify({ action, entity, detail: String(detail || ''), branchId: auditBranchId })
     }).catch(() => {});
   };
   const logStock = (itemId, itemName, qtyChange, reason, refId, branchId) => {
@@ -4502,8 +5050,8 @@ export default function App() {
   const visibleSales = filterOwn('sales', sales);
   const visibleExpenses = filterOwn('expenses', expenses);
   const visiblePOs = filterOwn('purchase', branchPurchaseOrders);
-  const visibleLeave = filterOwn('hr', leaveRequests);
-  const visiblePayroll = filterOwn('payroll', payrollRecords);
+  const visibleLeave = filterOwn('hr', strictBranchLeaveRequests);
+  const visiblePayroll = filterOwn('payroll', strictBranchPayrollRecords);
   const visibleLaybySales = filterOwn('laybys', (sales || []).filter(s => {
     const due = parseFloat(s.balanceDue) || Math.max(0, (parseFloat(s.totalAmount) || 0) - (parseFloat(s.paidAmount) || 0));
     return due > 0;
@@ -5414,7 +5962,7 @@ export default function App() {
                 className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-[11px] text-white max-w-[150px] focus:outline-none focus:border-emerald-500 font-medium"
                 title="Active location (multi-location allowed)"
               >
-                <option value="all">All locations</option>
+                {hasViewAllBranchesPriv && <option value="all">All locations</option>}
                 {(accessibleBranches || []).map(b => (
                   <option key={b.id} value={b.id}>{b.name}{b.isDefault ? ' ★' : ''}</option>
                 ))}
@@ -5630,7 +6178,7 @@ export default function App() {
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                     {/* Pending Leaves */}
                     {(dashboardApprovalFilter === 'all' || dashboardApprovalFilter === 'leaves') && pendingLeavesList.map(lr => (
-                      <div key={lr.id} className="bg-slate-900 border border-slate-700 rounded-xl p-3.5 space-y-2 flex flex-col justify-between">
+                      <div key={lr.id} onClick={() => { setActiveTabPersist('hr'); setHrSubTab('leave'); }} className="bg-slate-900 border border-slate-700 hover:border-sky-500/60 cursor-pointer transition-colors rounded-xl p-3.5 space-y-2 flex flex-col justify-between" title="Click to open HR Leave Management">
                         <div className="space-y-1">
                           <div className="flex items-center justify-between">
                             <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400 bg-sky-500/10 px-2 py-0.5 rounded border border-sky-500/20">Leave Request</span>
@@ -5641,11 +6189,11 @@ export default function App() {
                           <p className="text-[10px] text-slate-400">{lr.startDate} to {lr.endDate}</p>
                           {lr.reason && <p className="text-[11px] text-slate-300 italic bg-slate-950/60 p-2 rounded border border-slate-800">"{lr.reason}"</p>}
                         </div>
-                        <div className="flex items-center gap-2 pt-2 border-t border-slate-800">
-                          <button type="button" onClick={() => handleLeaveAction(lr, 'Approved')} className="flex-1 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs transition-colors">
+                        <div className="flex items-center gap-2 pt-2 border-t border-slate-800" onClick={e => e.stopPropagation()}>
+                          <button type="button" onClick={(e) => { e.stopPropagation(); handleLeaveAction(lr, 'Approved'); }} className="flex-1 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs transition-colors">
                             Approve
                           </button>
-                          <button type="button" onClick={() => handleLeaveAction(lr, 'Rejected')} className="flex-1 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-400 border border-red-500/30 font-bold rounded-lg text-xs transition-colors">
+                          <button type="button" onClick={(e) => { e.stopPropagation(); handleLeaveAction(lr, 'Rejected'); }} className="flex-1 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-400 border border-red-500/30 font-bold rounded-lg text-xs transition-colors">
                             Reject
                           </button>
                         </div>
@@ -5656,7 +6204,7 @@ export default function App() {
                     {(dashboardApprovalFilter === 'all' || dashboardApprovalFilter === 'purchases') && pendingPurchasesList.map(po => {
                       const poAmtNum = parseFloat(po.amount) || 0;
                       return (
-                        <div key={po.id} className="bg-slate-900 border border-slate-700 rounded-xl p-3.5 space-y-2 flex flex-col justify-between">
+                        <div key={po.id} onClick={() => { setActiveTabPersist('purchase'); setPurchaseSubTab('orders'); setSelectedPO(po); }} className="bg-slate-900 border border-slate-700 hover:border-amber-500/60 cursor-pointer transition-colors rounded-xl p-3.5 space-y-2 flex flex-col justify-between" title="Click to open Purchase Order">
                           <div className="space-y-1">
                             <div className="flex items-center justify-between">
                               <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">Purchase Order</span>
@@ -5667,8 +6215,9 @@ export default function App() {
                             <p className="text-sm font-bold text-emerald-400">{shopProfile.currency} {poAmtNum.toLocaleString()}</p>
                             <p className="text-[10px] text-slate-400">Created {po.date || '—'} by {po.createdBy || 'Staff'}</p>
                           </div>
-                          <div className="flex items-center gap-2 pt-2 border-t border-slate-800">
-                            <button type="button" onClick={async () => {
+                          <div className="flex items-center gap-2 pt-2 border-t border-slate-800" onClick={e => e.stopPropagation()}>
+                            <button type="button" onClick={async (e) => {
+                              e.stopPropagation();
                               const amt = parseFloat(po.amount) || 0;
                               const paid = parseFloat(po.paidAmount) || 0;
                               const updated = {
@@ -5688,7 +6237,8 @@ export default function App() {
                             }} className="flex-1 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs transition-colors">
                               Approve
                             </button>
-                            <button type="button" onClick={() => {
+                            <button type="button" onClick={(e) => {
+                              e.stopPropagation();
                               setActiveTabPersist('purchase');
                               setPurchaseSubTab('orders');
                               setSelectedPO(po);
@@ -5702,7 +6252,15 @@ export default function App() {
 
                     {/* Pending Returns */}
                     {(dashboardApprovalFilter === 'all' || dashboardApprovalFilter === 'returns') && pendingReturnsList.map(rr => (
-                      <div key={rr.id} className="bg-slate-900 border border-slate-700 rounded-xl p-3.5 space-y-2 flex flex-col justify-between">
+                      <div key={rr.id} onClick={() => {
+                        if (rr.kind === 'sale') {
+                          setActiveTabPersist('sales');
+                          setSalesLedgerSubTab('ledger');
+                        } else {
+                          setActiveTabPersist('purchase');
+                          setPurchaseSubTab('orders');
+                        }
+                      }} className="bg-slate-900 border border-slate-700 hover:border-purple-500/60 cursor-pointer transition-colors rounded-xl p-3.5 space-y-2 flex flex-col justify-between" title={`Click to open ${rr.kind === 'sale' ? 'Sales Ledger' : 'Purchase Orders'}`}>
                         <div className="space-y-1">
                           <div className="flex items-center justify-between">
                             <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border ${rr.kind === 'sale' ? 'text-blue-400 bg-blue-500/10 border-blue-500/20' : 'text-purple-400 bg-purple-500/10 border-purple-500/20'}`}>
@@ -5714,11 +6272,11 @@ export default function App() {
                           <p className="text-[11px] text-slate-300">Requested by: <span className="text-white font-medium">{rr.requestedBy || 'Staff'}</span></p>
                           {rr.reason && <p className="text-[11px] text-slate-300 italic bg-slate-950/60 p-2 rounded border border-slate-800">"{rr.reason}"</p>}
                         </div>
-                        <div className="flex items-center gap-2 pt-2 border-t border-slate-800">
-                          <button type="button" onClick={() => handleApproveReturnRequest(rr)} className="flex-1 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs transition-colors">
+                        <div className="flex items-center gap-2 pt-2 border-t border-slate-800" onClick={e => e.stopPropagation()}>
+                          <button type="button" onClick={(e) => { e.stopPropagation(); handleApproveReturnRequest(rr); }} className="flex-1 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs transition-colors">
                             Approve
                           </button>
-                          <button type="button" onClick={() => handleRejectReturnRequest(rr)} className="flex-1 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-400 border border-red-500/30 font-bold rounded-lg text-xs transition-colors">
+                          <button type="button" onClick={(e) => { e.stopPropagation(); handleRejectReturnRequest(rr); }} className="flex-1 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-400 border border-red-500/30 font-bold rounded-lg text-xs transition-colors">
                             Reject
                           </button>
                         </div>
@@ -6082,35 +6640,57 @@ export default function App() {
                       </div>
                     ))}
                   </div>
-                  {(offlineQueue || []).length > 0 && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-[10px] text-amber-400">Offline queue: {offlineQueue.length} sale(s) waiting to sync.</p>
-                      <button type="button" onClick={async () => {
-                        const q = [...(offlineQueue || [])];
-                        const remaining = [];
-                        let synced = 0;
-                        for (const job of q) {
-                          if (job.type !== 'sale' || !job.payload) { remaining.push(job); continue; }
-                          try {
-                            const payload = { ...job.payload };
-                            if (!payload.branchId && activeBranchId) payload.branchId = activeBranchId;
-                            const res = await apiFetch('/api/sales', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                            if (!res.ok) {
-                              const err = await res.json().catch(() => ({}));
-                              // Permanent client errors should not block forever on stock 409 after local already deducted
-                              if (res.status === 409) { synced++; continue; }
-                              throw new Error(err.error || 'fail');
-                            }
-                            synced++;
-                          } catch (e) {
-                            remaining.push(job);
-                          }
-                        }
-                        saveOfflineQueue(remaining);
-                        alert(remaining.length === 0 ? `All ${synced} queued sale(s) synced.` : `${synced} synced, ${remaining.length} still pending.`);
-                      }} className="px-2 py-0.5 bg-amber-500 text-slate-950 text-[10px] font-bold rounded">Sync now</button>
-                    </div>
-                  )}
+                  {(offlineQueue || []).length > 0 && (() => {
+                    const qList = offlineQueue || [];
+                    const pendingCnt = qList.filter(j => (j.status || 'pending') === 'pending').length;
+                    const failedCnt = qList.filter(j => j.status === 'failed').length;
+                    const syncedCnt = qList.filter(j => j.status === 'synced').length;
+                    return (
+                      <div className="bg-slate-900/90 border border-slate-700 rounded-lg p-2.5 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                            <span className="font-bold text-white">Offline Queue</span>
+                            <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold">Pending: {pendingCnt}</span>
+                            <span className="px-1.5 py-0.5 rounded bg-red-500/20 text-red-300 font-bold">Failed: {failedCnt}</span>
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold">Synced: {syncedCnt}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            <button type="button" disabled={offlineSyncBusy} onClick={async () => {
+                              const res = await syncOfflineQueue({ onlyFailed: false });
+                              if (res.authStopped) return;
+                              alert(`Sync complete: ${res.synced} synced, ${res.failed} failed, ${res.pending} pending.`);
+                            }} className="px-2 py-0.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-[10px] font-bold rounded">
+                              {offlineSyncBusy ? 'Syncing…' : 'Sync now'}
+                            </button>
+                            {failedCnt > 0 && (
+                              <button type="button" disabled={offlineSyncBusy} onClick={async () => {
+                                const res = await syncOfflineQueue({ onlyFailed: true });
+                                if (res.authStopped) return;
+                                alert(`Retry complete: ${res.synced} synced, ${res.failed} still failed.`);
+                              }} className="px-2 py-0.5 bg-red-500/20 hover:bg-red-500/30 text-red-300 text-[10px] font-bold rounded border border-red-500/30">
+                                Retry failed
+                              </button>
+                            )}
+                            {syncedCnt > 0 && (
+                              <button type="button" onClick={() => saveOfflineQueue(qList.filter(j => j.status !== 'synced'))} className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded">
+                                Clear synced
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        <div className="max-h-28 overflow-y-auto space-y-1">
+                          {qList.slice(0, 12).map((job, idx) => (
+                            <div key={job.id || idx} className="flex flex-wrap items-center justify-between gap-1 text-[10px] bg-slate-950/70 px-2 py-1 rounded border border-slate-800">
+                              <span className="text-slate-200 truncate max-w-[170px]">{job.type === 'expense' ? 'Expense' : 'Sale'} · {job.payload?.id || job.id}</span>
+                              <span className="text-slate-500">{job.at ? new Date(job.at).toLocaleTimeString() : ''}</span>
+                              <span className={`px-1.5 py-0.2 rounded font-bold uppercase ${job.status === 'synced' ? 'bg-emerald-500/20 text-emerald-400' : job.status === 'failed' ? 'bg-red-500/20 text-red-400' : 'bg-amber-500/20 text-amber-400'}`}>{job.status || 'pending'}</span>
+                              {job.lastError && <span className="w-full text-[9px] text-red-400 truncate" title={job.lastError}>{job.lastError}</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -6132,6 +6712,39 @@ export default function App() {
         {activeTab === 'pos' && (isAdminUser || canView('pos')) && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 bg-slate-800 p-5 rounded-xl border border-slate-700">
+              {(offlineQueue || []).length > 0 && (() => {
+                const qList = offlineQueue || [];
+                const pendingCnt = qList.filter(j => (j.status || 'pending') === 'pending').length;
+                const failedCnt = qList.filter(j => j.status === 'failed').length;
+                const syncedCnt = qList.filter(j => j.status === 'synced').length;
+                const latestErr = qList.find(j => j.status === 'failed' && j.lastError)?.lastError;
+                return (
+                  <div className="mb-3 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-bold text-white">Offline Queue:</span>
+                      <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold text-[10px]">Pending {pendingCnt}</span>
+                      <span className="px-1.5 py-0.5 rounded bg-red-500/20 text-red-300 font-bold text-[10px]">Failed {failedCnt}</span>
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold text-[10px]">Synced {syncedCnt}</span>
+                      {latestErr && <span className="text-[10px] text-red-400 truncate max-w-[220px]" title={latestErr}>· {latestErr}</span>}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      <button type="button" disabled={offlineSyncBusy} onClick={() => syncOfflineQueue({ onlyFailed: false })} className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold rounded text-[10px]">
+                        {offlineSyncBusy ? 'Syncing…' : 'Sync now'}
+                      </button>
+                      {failedCnt > 0 && (
+                        <button type="button" disabled={offlineSyncBusy} onClick={() => syncOfflineQueue({ onlyFailed: true })} className="px-2.5 py-1 bg-red-500/20 hover:bg-red-500/30 text-red-300 font-bold rounded text-[10px] border border-red-500/30">
+                          Retry failed
+                        </button>
+                      )}
+                      {syncedCnt > 0 && (
+                        <button type="button" onClick={() => saveOfflineQueue(qList.filter(j => j.status !== 'synced'))} className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded text-[10px]">
+                          Clear synced
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
               <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                 <div className="flex-1 min-w-[200px]">
                   <input 
@@ -6198,7 +6811,7 @@ export default function App() {
                         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3.5">
                           {pagedItems.map(item => (
                             <div key={item.id} onClick={() => addToCart(item)} className="bg-slate-900 border border-slate-700 rounded-lg p-2.5 cursor-pointer hover:border-emerald-500 flex flex-col justify-between relative transition-colors h-[280px]">
-                              <div className="absolute top-2 right-2 bg-slate-950/80 px-2 py-0.5 rounded text-[10px] text-slate-300 font-mono">Stock: {isTrackedInventory(item) ? item.quantity : '∞'}</div>
+                              <div className="absolute top-2 right-2 bg-slate-950/80 px-2 py-0.5 rounded text-[10px] text-slate-300 font-mono">Stock: {isTrackedInventory(item) ? getItemLocationQuantity(item, activeBranchId) : '∞'}</div>
                               <div>
                                 <img src={item.photoUrl} alt="" className="w-full h-45 object-cover rounded-md mb-1.5" />
                                 <p className="font-bold text-xs text-white line-clamp-1">{item.name}</p>
@@ -6301,15 +6914,19 @@ export default function App() {
                       const selCust = (branchCustomers || []).find(c => c.name === posSelectedCustomer);
                       if (!selCust) return null;
                       const cLimit = parseFloat(selCust.creditLimit) || 0;
+                      const custCreditBal = parseFloat(selCust.creditBalance) || 0;
                       const outstandingDebt = (sales || [])
                         .filter(s => (s.customerName === selCust.name || (selCust.id && s.customerId === selCust.id)) && (parseFloat(s.balanceDue) || 0) > 0.009)
                         .reduce((sum, s) => sum + (parseFloat(s.balanceDue) || 0), 0);
-                      if (cLimit <= 0 && outstandingDebt <= 0) return null;
+                      if (cLimit <= 0 && outstandingDebt <= 0 && custCreditBal <= 0) return null;
                       const isOver = cLimit > 0 && outstandingDebt > cLimit;
                       return (
-                        <div className={`mt-1.5 px-2.5 py-1.5 rounded-lg border flex flex-wrap items-center justify-between gap-1 text-[11px] ${isOver ? 'bg-rose-500/10 border-rose-500/40 text-rose-300' : 'bg-slate-900 border-slate-700 text-slate-300'}`}>
+                        <div className={`mt-1.5 px-2.5 py-1.5 rounded-lg border flex flex-wrap items-center justify-between gap-2 text-[11px] ${isOver ? 'bg-rose-500/10 border-rose-500/40 text-rose-300' : 'bg-slate-900 border-slate-700 text-slate-300'}`}>
                           <span>Credit Limit: <strong className="text-white">{cLimit > 0 ? `${shopProfile.currency} ${cLimit.toLocaleString()}` : 'Unlimited'}</strong></span>
                           <span>Unpaid Balance: <strong className={outstandingDebt > 0 ? (isOver ? 'text-rose-400 font-bold' : 'text-amber-400') : 'text-emerald-400'}>{shopProfile.currency} {outstandingDebt.toLocaleString()}</strong></span>
+                          {custCreditBal > 0 && (
+                            <span>Account Credit: <strong className="text-sky-400 font-bold">{shopProfile.currency} {custCreditBal.toLocaleString()}</strong></span>
+                          )}
                         </div>
                       );
                     })()}
@@ -6390,9 +7007,9 @@ export default function App() {
                                 onChange={(e) => {
                                   const q = parseInt(e.target.value) || 1;
                                   const live = (inventory || []).find(x => x.id === i.id) || i;
-                                  const avail = Number(live.quantity) || 0;
+                                  const avail = getItemLocationQuantity(live, activeBranchId);
                                   if (isTrackedInventory(i) && q > avail) {
-                                    alert('Stock limit reached.');
+                                    alert('Stock limit reached for this location.');
                                     return;
                                   }
                                   setPosCart(posCart.map(ci => ci.id === i.id ? { ...ci, cartQty: q } : ci));
@@ -6401,9 +7018,9 @@ export default function App() {
                               />
                               <button onClick={() => {
                                 const live = (inventory || []).find(x => x.id === i.id) || i;
-                                const avail = Number(live.quantity) || 0;
+                                const avail = getItemLocationQuantity(live, activeBranchId);
                                 if (isTrackedInventory(i) && i.cartQty >= avail) {
-                                  alert('Stock limit reached.');
+                                  alert('Stock limit reached for this location.');
                                   return;
                                 }
                                 const updated = posCart.map(ci => ci.id === i.id ? { ...ci, cartQty: ci.cartQty + 1 } : ci);
@@ -6502,6 +7119,45 @@ export default function App() {
                     );
                   })()}
 
+                  {posSelectedCustomer && (() => {
+                    const cust = (branchCustomers || []).find(c => c.name === posSelectedCustomer) || (customers || []).find(c => c.name === posSelectedCustomer);
+                    const availCred = parseFloat(cust?.creditBalance) || 0;
+                    if (availCred <= 0) return null;
+                    const sub = posCart.reduce((sum, i) => sum + (i.price * i.cartQty), 0);
+                    let total = sub;
+                    if (posApplyTax && taxSettings.salesTaxRate > 0 && !posTaxInclusive) {
+                      total = sub + sub * (taxSettings.salesTaxRate / 100);
+                    }
+                    const vpp = parseFloat(loyaltySettings.redeemValue) || 1;
+                    const rPts = loyaltySettings.enabled ? Math.min(parseFloat(cust?.loyaltyPoints) || 0, Math.floor(parseFloat(posRedeemPoints) || 0)) : 0;
+                    const maxCredUse = Math.max(0, Math.round(Math.min(availCred, Math.max(0, total - (rPts * vpp))) * 100) / 100);
+                    return (
+                      <div className="bg-slate-900 border border-sky-500/40 rounded p-2 space-y-1.5 mt-2">
+                        <div className="flex justify-between text-[10px]">
+                          <span className="text-sky-300 font-semibold">Customer Account Credit</span>
+                          <span className="text-sky-400 font-bold">{shopProfile.currency} {availCred.toLocaleString()}</span>
+                        </div>
+                        <div className="flex gap-2 items-end">
+                          <div className="flex-1">
+                            <label className="text-[10px] text-slate-400 block mb-0.5">Use Account Credit (max {shopProfile.currency} {maxCredUse.toLocaleString()})</label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              max={maxCredUse}
+                              value={posAccountCreditUsed}
+                              onChange={e => setPosAccountCreditUsed(e.target.value)}
+                              placeholder="0"
+                              className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-white"
+                            />
+                          </div>
+                          <button type="button" onClick={() => setPosAccountCreditUsed(String(maxCredUse))} className="px-2 py-1.5 bg-sky-500/20 text-sky-400 text-[10px] font-bold rounded">Max</button>
+                          <button type="button" onClick={() => setPosAccountCreditUsed('')} className="px-2 py-1.5 bg-slate-800 text-slate-400 text-[10px] font-bold rounded">Clear</button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2">
                     <div>
                       <label className="text-[10px] text-slate-400 block mb-1">Cash Paid ({shopProfile.currency}):</label>
@@ -6555,15 +7211,25 @@ export default function App() {
                     if (posApplyTax && taxSettings.salesTaxRate > 0 && !posTaxInclusive) {
                       totalCartAmt = sub + sub * (taxSettings.salesTaxRate / 100);
                     }
-                    const _custL = (branchCustomers || []).find(c => c.name === posSelectedCustomer);
+                    const _custL = (branchCustomers || []).find(c => c.name === posSelectedCustomer) || (customers || []).find(c => c.name === posSelectedCustomer);
                     const _vpp = parseFloat(loyaltySettings.redeemValue) || 1;
                     const _rPts = loyaltySettings.enabled ? Math.min(parseFloat(_custL?.loyaltyPoints)||0, Math.floor(parseFloat(posRedeemPoints)||0)) : 0;
-                    const paidTotal = (parseFloat(posCashPaid) || 0) + (parseFloat(posMpesaPaid) || 0) + (parseFloat(posBankPaid) || 0) + (_rPts * _vpp);
+                    const _acctCred = Math.min(parseFloat(_custL?.creditBalance) || 0, Math.max(0, totalCartAmt - (_rPts * _vpp)), Math.max(0, parseFloat(posAccountCreditUsed) || 0));
+                    const paidTotal = (parseFloat(posCashPaid) || 0) + (parseFloat(posMpesaPaid) || 0) + (parseFloat(posBankPaid) || 0) + (_rPts * _vpp) + _acctCred;
                     const balanceDueCalc = Math.max(0, totalCartAmt - paidTotal);
+                    const excessCreditAmt = Math.max(0, Math.round((paidTotal - totalCartAmt) * 100) / 100);
                     return (
-                      <div className="bg-slate-900 p-2 rounded border border-slate-700 flex justify-between items-center text-xs mt-2">
-                        <span className="text-amber-400 font-semibold">Balance Due:</span>
-                        <span className="font-bold text-amber-400">{shopProfile.currency} {balanceDueCalc.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
+                      <div className="space-y-1.5 mt-2">
+                        <div className="bg-slate-900 p-2 rounded border border-slate-700 flex justify-between items-center text-xs">
+                          <span className="text-amber-400 font-semibold">Balance Due:</span>
+                          <span className="font-bold text-amber-400">{shopProfile.currency} {balanceDueCalc.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
+                        </div>
+                        {excessCreditAmt > 0.009 && (
+                          <div className="bg-sky-500/15 p-2 rounded border border-sky-500/40 flex justify-between items-center text-xs">
+                            <span className="text-sky-300 font-semibold">Excess Credited to Customer Account:</span>
+                            <span className="font-bold text-sky-400">+{shopProfile.currency} {excessCreditAmt.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
+                          </div>
+                        )}
                       </div>
                     );
                   })()}
@@ -6578,7 +7244,7 @@ export default function App() {
               </div>
               <div className="pt-3 border-t border-slate-700 mt-3">
                 {(isAdminUser || canCreate('pos')) ? (
-                  <button onClick={handleCheckout} disabled={posCart.length === 0 || !posSelectedCustomer} className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 text-slate-950 font-bold rounded-lg text-xs">Complete Sale</button>
+                  <button id="pos-complete-sale-btn" onClick={handleCheckout} disabled={posCheckoutBusy || sessionExpiredModalOpen || posCart.length === 0 || !posSelectedCustomer} className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 disabled:cursor-not-allowed text-slate-950 font-bold rounded-lg text-xs">{posCheckoutBusy ? 'Posting sale…' : 'Complete Sale'}</button>
                 ) : (
                   <p className="text-[10px] text-center text-amber-400">No create privilege for POS.</p>
                 )}
@@ -6611,6 +7277,7 @@ export default function App() {
                       <th className="py-2 px-3">Location</th>
                       <th className="py-2 px-3">Eligibility</th>
                       <th className="py-2 px-3">Max Credit Limit</th>
+                      <th className="py-2 px-3">Account Credit</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-700">
@@ -6637,6 +7304,15 @@ export default function App() {
                             </span>
                           ) : (
                             <span className="text-slate-500 text-[11px]">Unlimited (0)</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-3">
+                          {(parseFloat(cust.creditBalance) || 0) > 0 ? (
+                            <span className="text-sky-400 font-bold tabular-nums">
+                              {shopProfile.currency} {(parseFloat(cust.creditBalance) || 0).toLocaleString()}
+                            </span>
+                          ) : (
+                            <span className="text-slate-500 text-[11px]">{shopProfile.currency} 0</span>
                           )}
                         </td>
                       </tr>
@@ -6830,6 +7506,38 @@ export default function App() {
                 </button>
               )}
             </div>
+            {(() => {
+              const legacyUnassignedItems = (branches || []).length > 0
+                ? (inventory || []).filter(i => i.isLegacyUnassigned || (!i.branchId && !i.rawAllLocations && !i.allLocations && parseAllowedBranches(i).length === 0))
+                : [];
+              if (!legacyUnassignedItems.length || !(isAdminUser || canUpdate('inventory'))) return null;
+              return (
+                <div className="bg-amber-500/10 border border-amber-500/40 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-xs">
+                    <p className="font-bold text-amber-300">{legacyUnassignedItems.length} legacy item(s) lack a branch assignment</p>
+                    <p className="text-[11px] text-amber-100/80 mt-0.5">Assign these items to a primary location or duplicate them with per-branch stock quantities so stock decrements and P&amp;L stay accurate.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const defBranchId = strictActiveBranchId || activeBranchId || (accessibleBranches[0]?.id || branches[0]?.id || '');
+                      const initSel = {};
+                      legacyUnassignedItems.forEach(it => { initSel[it.id] = true; });
+                      const initQtys = {};
+                      (branches || []).forEach(b => { initQtys[b.id] = ''; });
+                      setLegacyAssignMode('assign');
+                      setLegacyAssignBranchId(defBranchId);
+                      setLegacyAssignSelectedIds(initSel);
+                      setLegacyAssignBranchQtys(initQtys);
+                      setLegacyAssignModalOpen(true);
+                    }}
+                    className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs shrink-0"
+                  >
+                    Assign / Split Legacy Items
+                  </button>
+                </div>
+              );
+            })()}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <SearchableSelect value={inventoryCategoryFilter} onChange={e=>setInventoryCategoryFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Categories</option>{[...new Set((inventory||[]).map(i=>i.category).filter(Boolean))].map(v=><option key={v}>{v}</option>)}</SearchableSelect>
               <SearchableSelect value={inventoryTrackFilter} onChange={e=>setInventoryTrackFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">Track Inventory: All</option><option value="yes">Tracked</option><option value="no">Not Tracked</option></SearchableSelect>
@@ -6876,9 +7584,12 @@ export default function App() {
                 {(transferForm.lines || [{ itemId: '', qty: '' }]).map((line, idx) => {
                   const srcId = transferForm.fromBranchId || activeBranchId;
                   const srcItems = (inventory || []).filter(i => {
-                    if (!isTrackedInventory(i) || (Number(i.quantity) || 0) <= 0) return false;
+                    if (!isTrackedInventory(i)) return false;
+                    if (getItemLocationQuantity(i, srcId || 'all') <= 0) return false;
                     if (!srcId) return true;
-                    // Items with explicit branch must match source; items without branchId are legacy/shared and selectable from any source
+                    const allowed = parseAllowedBranches(i);
+                    if (isItemInAllLocations(i)) return true;
+                    if (allowed.length > 0) return allowed.includes(String(srcId));
                     if (!i.branchId) return true;
                     return String(i.branchId) === String(srcId);
                   });
@@ -6895,7 +7606,7 @@ export default function App() {
                           }} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
                             <option value="">Select item</option>
                             {srcItems.map(i => (
-                              <option key={i.id} value={i.id}>{formatItemDisplayName(i)} (qty {i.quantity})</option>
+                              <option key={i.id} value={i.id}>{formatItemDisplayName(i)} (qty {getItemLocationQuantity(i, srcId || 'all')})</option>
                             ))}
                           </SearchableSelect>
                         </div>
@@ -6931,15 +7642,22 @@ export default function App() {
                 const mvExtra = [];
                 for (const line of lines) {
                   const qty = parseInt(line.qty, 10) || 0;
-                  const res = await apiFetch('/api/stock-transfer', { method: 'POST', body: JSON.stringify({ fromItemId: line.itemId, toBranchId: toB, qty }) });
+                  const res = await apiFetch('/api/stock-transfer', { method: 'POST', body: JSON.stringify({ fromItemId: line.itemId, fromBranchId: fromB, toBranchId: toB, qty }) });
                   const d = await res.json().catch(() => ({}));
                   if (!res.ok) { alert(d.error || 'Transfer failed for an item'); continue; }
                   ok++;
-                  if (d.from) setInventory(prev => prev.map(i => i.id === d.from.id ? { ...i, ...d.from } : i));
+                  const normalizeServerItem = (it) => {
+                    if (!it) return it;
+                    const lq = parseLocationQuantities(it);
+                    const ab = parseAllowedBranches(it);
+                    return { ...it, locationQuantities: lq, allowedBranches: ab, allLocations: !!(it.allLocations === true || it.allLocations === 1) };
+                  };
+                  if (d.from) setInventory(prev => prev.map(i => i.id === d.from.id ? { ...i, ...normalizeServerItem(d.from) } : i));
                   if (d.to) {
+                    const normTo = normalizeServerItem(d.to);
                     setInventory(prev => {
-                      const exists = prev.some(i => i.id === d.to.id);
-                      return exists ? prev.map(i => i.id === d.to.id ? { ...i, ...d.to } : i) : [d.to, ...prev];
+                      const exists = prev.some(i => i.id === normTo.id);
+                      return exists ? prev.map(i => i.id === normTo.id ? { ...i, ...normTo } : i) : [normTo, ...prev];
                     });
                   }
                   const src = (inventory || []).find(i => i.id === line.itemId);
@@ -7023,13 +7741,21 @@ export default function App() {
                     <th className="py-2 px-3">Category</th>
                     <th className="py-2 px-3">Price</th>
                     <th className="py-2 px-3">Stock Qty</th>
+                    <th className="py-2 px-3">Valuation</th>
                     <th className="py-2 px-3">Track Inventory</th>
                     <th className="py-2 px-3">Status</th>
                     <th className="py-2 px-3 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
-                  {filterOwn('inventory', branchInventory || []).filter(item => (!inventoryCategoryFilter || item.category===inventoryCategoryFilter) && (!inventoryTrackFilter || (inventoryTrackFilter==='yes' ? !!item.trackInventory : !item.trackInventory)) && (!inventoryStatusFilter || item.status===inventoryStatusFilter)).map(item => (
+                  {filterOwn('inventory', branchInventory || []).filter(item => (!inventoryCategoryFilter || item.category===inventoryCategoryFilter) && (!inventoryTrackFilter || (inventoryTrackFilter==='yes' ? !!item.trackInventory : !item.trackInventory)) && (!inventoryStatusFilter || item.status===inventoryStatusFilter)).map(item => {
+                    const tracked = isTrackedInventory(item);
+                    const locQty = tracked ? getItemLocationQuantity(item, activeLocKey || 'all') : 0;
+                    const locVal = tracked ? getItemLocationValuation(item, activeLocKey || 'all') : 0;
+                    const breakdown = (!activeLocKey && tracked && (branches || []).length > 1 && (isItemInAllLocations(item) || parseAllowedBranches(item).length > 0))
+                      ? getItemLocationBreakdown(item)
+                      : [];
+                    return (
                     <tr 
                       key={item.id} 
                       onClick={() => setSelectedInventoryItem(item)}
@@ -7049,11 +7775,21 @@ export default function App() {
                             </div>
                           );
                         })()}
+                        {breakdown.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {breakdown.map(b => (
+                              <span key={b.branchId} className="px-1.5 py-0.5 rounded bg-slate-950 border border-emerald-500/30 text-[10px] font-normal text-slate-300">
+                                <span className="text-emerald-400 font-semibold">{b.branchName}:</span> {b.qty} · {shopProfile.currency} {b.value.toLocaleString()}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </td>
                       <td className="py-2 px-3">{item.category}</td>
                       <td className="py-2 px-3 font-bold text-emerald-400">{shopProfile.currency} {item.price}</td>
-                      <td className="py-2 px-3 font-mono">{item.trackInventory ? item.quantity : 'Not Tracked'}</td>
-                      <td className="py-2 px-3"><span className={`px-2 py-0.5 rounded text-[10px] font-bold ${item.trackInventory ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700 text-slate-400'}`}>{item.trackInventory ? 'Yes' : 'No'}</span></td>
+                      <td className="py-2 px-3 font-mono">{tracked ? locQty : 'Not Tracked'}</td>
+                      <td className="py-2 px-3 font-mono text-emerald-400">{tracked ? `${shopProfile.currency} ${locVal.toLocaleString()}` : '—'}</td>
+                      <td className="py-2 px-3"><span className={`px-2 py-0.5 rounded text-[10px] font-bold ${tracked ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700 text-slate-400'}`}>{tracked ? 'Yes' : 'No'}</span></td>
                       <td className="py-2 px-3"><span className="bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded text-[10px]">{item.status}</span></td>
                       <td className="py-2 px-3 text-right whitespace-nowrap" onClick={e => e.stopPropagation()}>
                         <button
@@ -7067,7 +7803,8 @@ export default function App() {
                         </button>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -7316,7 +8053,7 @@ export default function App() {
                 <input type="date" aria-label="Purchase order from" value={poDateStart} onChange={e=>setPoDateStart(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white" />
                 <input type="date" aria-label="Purchase order to" value={poDateEnd} onChange={e=>setPoDateEnd(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white" />
                 <SearchableSelect value={poItemFilter} onChange={e=>setPoItemFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Items</option>{(branchInventory || []).map(v=><option key={v.id} value={formatItemDisplayName(v)}>{formatItemDisplayName(v)}</option>)}</SearchableSelect>
-                <SearchableSelect value={poStatusFilter} onChange={e=>setPoStatusFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Workflow Statuses</option>{['Draft','Approved','Received','Payment','Purchase Return'].map(v=><option key={v} value={v}>{v === 'Purchase Return' ? 'P. Return' : v}</option>)}</SearchableSelect>
+                <SearchableSelect value={poStatusFilter} onChange={e=>setPoStatusFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Workflow Statuses</option>{['Draft','Approved','Partially Received','Received','Payment','Purchase Return'].map(v=><option key={v} value={v}>{v === 'Purchase Return' ? 'P. Return' : v}</option>)}</SearchableSelect>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs text-slate-300">
@@ -7366,6 +8103,9 @@ export default function App() {
                               <span className="inline-block bg-slate-900 text-slate-200 px-2.5 py-1 rounded border border-slate-700 font-bold whitespace-nowrap">
                                 {po.workflowStatus === 'Purchase Return' ? 'P. Return' : po.workflowStatus}
                               </span>
+                              {(Number(po.receivedQty) || 0) > 0 && !po.received && (
+                                <span className="block text-[10px] text-sky-400 font-mono mt-0.5">Rec: {Number(po.receivedQty) || 0}/{Number(po.quantity) || 0}</span>
+                              )}
                             </td>
                             <td className="py-3 px-3 text-sky-400 font-semibold">{po.createdBy || '—'}</td>
                             <td className="py-3 px-3 space-x-1" onClick={e => e.stopPropagation()}>
@@ -7415,21 +8155,10 @@ export default function App() {
                                     }
                                   }} className="px-2 py-1 bg-red-500/20 text-red-400 font-bold rounded text-[10px]">Delete</button>
                               )}
-                              {po.workflowStatus === 'Approved' && (isAdminUser || canUpdate('purchase')) && (
-                                <button onClick={async () => {
-                                  if (po.received) { alert('This PO was already received.'); return; }
-                                  const matchedInv = inventory.find(inv => inv.id === po.itemId || (inv.name || '').toLowerCase() === (po.itemName || '').toLowerCase());
-                                  if (!matchedInv) { alert(`Inventory item ${po.itemName || po.itemId} was not found. Create or link the inventory item before receiving.`); return; }
-                                  try {
-                                    const receiveRes = await apiFetch('/api/purchase-receive', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ poId: po.id }) });
-                                    const receiveData = await receiveRes.json().catch(() => ({}));
-                                    if (!receiveRes.ok) throw new Error(receiveData.error || 'Purchase receipt failed.');
-                                    const updatedPO = { ...po, ...receiveData.purchaseOrder, received: true, workflowStatus: 'Received', receivedDate: new Date().toISOString().slice(0, 10) };
-                                    setPurchaseOrders((prev) => prev.map(p => p.id === po.id ? updatedPO : p));
-                                    if (receiveData.inventory) setInventory((prev) => prev.map(inv => inv.id === receiveData.inventory.id ? { ...inv, ...receiveData.inventory } : inv));
-                                    if (typeof logStock === 'function') logStock(matchedInv.id, matchedInv.name, receiveData.receivedQty || 0, 'PO Receive', po.id);
-                                  } catch (err) { alert(err.message || 'Purchase receipt failed. Stock and PO were not updated.'); }
-                                }} className="px-2 py-1 bg-emerald-500/20 text-emerald-400 font-bold rounded text-[10px]">Receive</button>
+                              {(po.workflowStatus === 'Approved' || po.workflowStatus === 'Partially Received' || (po.workflowStatus === 'Payment' && !po.received)) && !po.received && (isAdminUser || canUpdate('purchase')) && (
+                                <button onClick={() => openPOReceiveModal(po)} className="px-2 py-1 bg-emerald-500/20 text-emerald-400 font-bold rounded text-[10px]">
+                                  {(Number(po.receivedQty) || 0) > 0 ? 'Receive More' : 'Receive'}
+                                </button>
                               )}
                               {(parseFloat(po.balanceDue) || 0) > 0 && po.paymentStatus !== 'Paid' && po.workflowStatus !== 'Purchase Return' && po.workflowStatus !== 'Draft' && (isAdminUser || canUpdate('purchase')) && (
                                 <button onClick={() => {
@@ -7438,7 +8167,7 @@ export default function App() {
                                   setPoPaymentModalOpen(true);
                                 }} className="px-2 py-1 bg-emerald-500 text-slate-950 font-bold rounded text-[10px]">Pay / Partial</button>
                               )}
-                              {po.workflowStatus !== 'Draft' && po.workflowStatus !== 'Purchase Return' && ((po.quantity || 0) - (po.returnedQty || 0) > 0) && (isAdminUser || canUpdate('purchase') || canCreate('purchase') || canView('purchase')) && (
+                              {po.workflowStatus !== 'Draft' && po.workflowStatus !== 'Purchase Return' && (po.received || (Number(po.receivedQty) || 0) > 0 || ['Received', 'Partially Received', 'Payment'].includes(po.workflowStatus)) && (((po.received ? (Number(po.quantity) || 0) : ((Number(po.receivedQty) || 0) || (Number(po.quantity) || 0))) - (Number(po.returnedQty) || 0)) > 0) && (isAdminUser || canUpdate('purchase') || canCreate('purchase') || canView('purchase')) && (
                                 <button onClick={() => openPurchaseReturn(po)} className="px-2 py-1 bg-amber-500/20 text-amber-400 font-bold rounded text-[10px]">
                                   {(isAdminUser || canUpdate('purchase')) ? 'Purchase Return' : 'Request Return'}
                                 </button>
@@ -7801,7 +8530,7 @@ export default function App() {
                                   <option value="">-- Choose Item --</option>
                                   {(branchInventory || []).map(i => (
                                     <option key={i.id} value={i.id}>
-                                      {formatItemDisplayName(i)}{isTrackedInventory(i) ? ` [Stock: ${i.quantity}]` : ''}
+                                      {formatItemDisplayName(i)}{isTrackedInventory(i) ? ` [Stock: ${getItemLocationQuantity(i, activeBranchId)}]` : ''}
                                     </option>
                                   ))}
                                 </SearchableSelect>
@@ -7869,7 +8598,7 @@ export default function App() {
                                   <div className="flex items-center gap-2 text-[10px] font-mono text-slate-400">
                                     <span>Buying Price: <strong className="text-slate-200">{shopProfile.currency} {invItem.buyingPrice || 0}</strong></span>
                                     <span>·</span>
-                                    <span>Stock: <strong className={isTrackedInventory(invItem) && invItem.quantity <= (invItem.lowStockAlert || 5) ? 'text-amber-400 font-bold' : 'text-emerald-400 font-bold'}>{isTrackedInventory(invItem) ? invItem.quantity : '∞'}</strong></span>
+                                    <span>Stock: <strong className={isTrackedInventory(invItem) && getItemLocationQuantity(invItem, activeBranchId) <= (invItem.lowStockAlert || 5) ? 'text-amber-400 font-bold' : 'text-emerald-400 font-bold'}>{isTrackedInventory(invItem) ? getItemLocationQuantity(invItem, activeBranchId) : '∞'}</strong></span>
                                   </div>
                                 )}
                               </div>
@@ -7911,7 +8640,7 @@ export default function App() {
 
             {/* Partial / Full Payment Modal */}
             
-            {selectedPO && !poPaymentModalOpen && !purchaseReturnModalOpen && (
+            {selectedPO && !poPaymentModalOpen && !purchaseReturnModalOpen && !poReceiveModalOpen && (
               <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
                 <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
                   <div className="flex justify-between items-center border-b border-slate-800 pb-2">
@@ -8108,10 +8837,11 @@ export default function App() {
                       paidAmount: newPaid,
                       balanceDue: newBalance,
                       paymentMethod: selectedPO.paymentMethod && selectedPO.paymentMethod !== poPaymentForm.paymentMethod ? `${selectedPO.paymentMethod} + ${poPaymentForm.paymentMethod}` : poPaymentForm.paymentMethod,
+                      lastPaymentMethod: poPaymentForm.paymentMethod,
                       paymentStatus: newStatus,
                       paymentHistory: [...existingHist, paymentRecord],
                       mpesaCode: String(poPaymentForm.paymentMethod||'').toLowerCase().includes('m-pesa') ? (poPaymentForm.mpesaCode || selectedPO.mpesaCode || '') : (selectedPO.mpesaCode || ''),
-                      workflowStatus: selectedPO.workflowStatus === 'Draft' ? selectedPO.workflowStatus : 'Payment'
+                      workflowStatus: selectedPO.workflowStatus === 'Draft' ? selectedPO.workflowStatus : (selectedPO.workflowStatus === 'Partially Received' ? 'Partially Received' : 'Payment')
                     };
                     const ok = await upsertPO(updated);
                     if (ok) {
@@ -8158,6 +8888,10 @@ export default function App() {
                 <h3 className="text-sm font-bold text-white mb-4">Record Operating Expense</h3>
                 <form onSubmit={async e => {
                   e.preventDefault();
+                  if (sessionExpiredModalOpen) {
+                    alert('Session expired — please sign in again before saving expenses.');
+                    return;
+                  }
                   if (!newExpense.amount || !newExpense.description) return;
                   const baseAmt = parseFloat(newExpense.amount) || 0;
                   let taxAmt = 0;
@@ -8197,19 +8931,35 @@ export default function App() {
                     taxRate: expenseApplyTax ? (taxSettings.expenseTaxRate ?? taxSettings.purchaseTaxRate) : 0,
                     taxName: expenseApplyTax ? (taxSettings.expenseTaxName || 'Expense VAT') : (taxSettings.purchaseTaxName || 'VAT')
                   };
-                  persistExpenses([exp, ...expenses]);
-                  if (paidFinal > 0) {
-                    logAudit('payment', 'expense', `${exp.id} · ${shopProfile.currency} ${paidFinal} via ${newExpense.paymentMethod || 'Cash'} (${newExpense.description || ''})`);
-                  }
-                  setNewExpense({ date: new Date().toISOString().split('T')[0], category: expenseCategories[0]?.name || 'Store Rent', description: '', amount: '', paidAmount: '', paymentMethod: 'Cash', mpesaCode: '', payer: '', paidTo: '' });
                   try {
-                    await apiFetch('/api/expenses', {
+                    const res = await apiFetch('/api/expenses', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify(exp)
                     });
+                    if (res.status === 401) {
+                      return;
+                    }
+                    if (!res.ok) {
+                      const errData = await res.json().catch(() => ({}));
+                      if (res.status >= 400 && res.status < 500) {
+                        alert(errData.error || 'Could not save expense.');
+                        return;
+                      }
+                      throw new Error(errData.error || `HTTP ${res.status}`);
+                    }
+                    persistExpenses([exp, ...expenses]);
+                    if (paidFinal > 0) {
+                      logAudit('payment', 'expense', `${exp.id} · ${shopProfile.currency} ${paidFinal} via ${newExpense.paymentMethod || 'Cash'} (${newExpense.description || ''})`);
+                    }
+                    setNewExpense({ date: new Date().toISOString().split('T')[0], category: expenseCategories[0]?.name || 'Store Rent', description: '', amount: '', paidAmount: '', paymentMethod: 'Cash', mpesaCode: '', payer: '', paidTo: '' });
                   } catch (err) {
-                    console.warn('Expense saved locally', err);
+                    persistExpenses([exp, ...expenses]);
+                    if (paidFinal > 0) {
+                      logAudit('payment', 'expense', `${exp.id} · ${shopProfile.currency} ${paidFinal} via ${newExpense.paymentMethod || 'Cash'} (${newExpense.description || ''})`);
+                    }
+                    saveOfflineQueue([...(offlineQueue || []), { id: `oq-exp-${Date.now()}`, type: 'expense', payload: exp, at: new Date().toISOString(), status: 'pending', lastError: (err && err.message) || 'Offline / queued for sync' }]);
+                    setNewExpense({ date: new Date().toISOString().split('T')[0], category: expenseCategories[0]?.name || 'Store Rent', description: '', amount: '', paidAmount: '', paymentMethod: 'Cash', mpesaCode: '', payer: '', paidTo: '' });
                   }
                 }} className="space-y-3 text-xs">
                   <div>
@@ -8434,14 +9184,14 @@ export default function App() {
             {effectiveHrSubTab === 'employees' && (isAdminUser || canView('employees')) && (
               <div className="space-y-4">
                 <div className="flex justify-between items-center">
-                  <p className="text-xs text-slate-400">{employees.length} employee(s) registered</p>
+                  <p className="text-xs text-slate-400">{strictBranchEmployees.length} employee(s) registered{!showAllBranchesScope && strictActiveBranchId ? ` (${(branches || []).find(b => String(b.id) === String(strictActiveBranchId))?.name || 'selected branch'})` : ''}</p>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 w-full max-w-2xl">
-                    <SearchableSelect value={employeePositionFilter} onChange={e=>setEmployeePositionFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Positions</option>{[...new Set(employees.map(e=>e.position).filter(Boolean))].map(v=><option key={v}>{v}</option>)}</SearchableSelect>
-                    <SearchableSelect value={employeeDepartmentFilter} onChange={e=>setEmployeeDepartmentFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Departments</option>{[...new Set(employees.map(e=>e.department).filter(Boolean))].map(v=><option key={v}>{v}</option>)}</SearchableSelect>
-                    <SearchableSelect value={employeeManagerFilter} onChange={e=>setEmployeeManagerFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Report To</option>{employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</SearchableSelect>
+                    <SearchableSelect value={employeePositionFilter} onChange={e=>setEmployeePositionFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Positions</option>{[...new Set(strictBranchEmployees.map(e=>e.position).filter(Boolean))].map(v=><option key={v}>{v}</option>)}</SearchableSelect>
+                    <SearchableSelect value={employeeDepartmentFilter} onChange={e=>setEmployeeDepartmentFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Departments</option>{[...new Set(strictBranchEmployees.map(e=>e.department).filter(Boolean))].map(v=><option key={v}>{v}</option>)}</SearchableSelect>
+                    <SearchableSelect value={employeeManagerFilter} onChange={e=>setEmployeeManagerFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Report To</option>{strictBranchEmployees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</SearchableSelect>
                   </div>
                   {(isAdminUser || canCreate('employees')) && (
-                    <button onClick={() => { setSelectedEmployee(null); setEmployeeForm({ name: '', position: '', department: (hrSettings.departments && hrSettings.departments[0]) || 'Sales', phone: '', email: '', hireDate: new Date().toISOString().split('T')[0], salary: '', status: 'Active', nationalId: '', bankAccount: '', bankName: '', leaveBalance: hrSettings.defaultAnnualLeave || 21, managerId: '' }); setEmployeeModalOpen(true); }} className="px-3 py-2 bg-emerald-500 text-slate-950 text-xs font-bold rounded flex items-center gap-1"><Plus className="w-3.5 h-3.5" /> Add Employee</button>
+                    <button onClick={() => { setSelectedEmployee(null); setEmployeeForm({ name: '', position: '', department: (hrSettings.departments && hrSettings.departments[0]) || 'Sales', phone: '', email: '', hireDate: new Date().toISOString().split('T')[0], salary: '', status: 'Active', nationalId: '', bankAccount: '', bankName: '', leaveBalance: hrSettings.defaultAnnualLeave || 21, managerId: '', branchId: strictActiveBranchId || activeBranchId || '' }); setEmployeeModalOpen(true); }} className="px-3 py-2 bg-emerald-500 text-slate-950 text-xs font-bold rounded flex items-center gap-1"><Plus className="w-3.5 h-3.5" /> Add Employee</button>
                   )}
                 </div>
                 <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-x-auto">
@@ -8461,9 +9211,9 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-700">
-                      {filterOwn('employees', branchEmployees).filter(emp => (!employeePositionFilter || emp.position===employeePositionFilter) && (!employeeDepartmentFilter || emp.department===employeeDepartmentFilter) && (!employeeManagerFilter || emp.managerId===employeeManagerFilter)).length === 0 ? (
-                        <tr><td colSpan={10} className="py-8 text-center text-slate-500">No employees yet. Add your first employee.</td></tr>
-                      ) : filterOwn('employees', branchEmployees).filter(emp => (!employeePositionFilter || emp.position===employeePositionFilter) && (!employeeDepartmentFilter || emp.department===employeeDepartmentFilter) && (!employeeManagerFilter || emp.managerId===employeeManagerFilter)).map(emp => (
+                      {filterOwn('employees', strictBranchEmployees).filter(emp => (!employeePositionFilter || emp.position===employeePositionFilter) && (!employeeDepartmentFilter || emp.department===employeeDepartmentFilter) && (!employeeManagerFilter || emp.managerId===employeeManagerFilter)).length === 0 ? (
+                        <tr><td colSpan={10} className="py-8 text-center text-slate-500">No employees found for this location.</td></tr>
+                      ) : filterOwn('employees', strictBranchEmployees).filter(emp => (!employeePositionFilter || emp.position===employeePositionFilter) && (!employeeDepartmentFilter || emp.department===employeeDepartmentFilter) && (!employeeManagerFilter || emp.managerId===employeeManagerFilter)).map(emp => (
                         <tr key={emp.id} className="hover:bg-slate-700/40">
                           <td className="py-2 px-3 font-semibold text-white">{emp.name}</td>
                           <td className="py-2 px-3">{emp.position || '—'}</td>
@@ -8476,7 +9226,7 @@ export default function App() {
                           <td className="py-2 px-3"><span className={`px-2 py-0.5 rounded text-[10px] font-bold ${emp.status === 'Active' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-600 text-slate-300'}`}>{emp.status}</span></td>
                           <td className="py-2 px-3 flex gap-1">
                             {(isAdminUser || canUpdate('employees')) && (
-                              <button onClick={() => { setSelectedEmployee(emp); setEmployeeForm({ ...emp, salary: emp.salary ?? '', leaveBalance: emp.leaveBalance ?? 21 }); setEmployeeModalOpen(true); }} className="p-1 text-slate-400 hover:text-emerald-400"><Edit className="w-3.5 h-3.5" /></button>
+                              <button onClick={() => { setSelectedEmployee(emp); setEmployeeForm({ ...emp, salary: emp.salary ?? '', leaveBalance: emp.leaveBalance ?? 21, branchId: emp.branchId || strictActiveBranchId || activeBranchId || '' }); setEmployeeModalOpen(true); }} className="p-1 text-slate-400 hover:text-emerald-400"><Edit className="w-3.5 h-3.5" /></button>
                             )}
                             {(isAdminUser || canDelete('employees')) && (
                               <button onClick={() => handleDeleteEmployee(emp.id)} className="p-1 text-slate-400 hover:text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
@@ -8491,20 +9241,25 @@ export default function App() {
             )}
 
 
-            {effectiveHrSubTab === 'org' && (
+            {effectiveHrSubTab === 'org' && (() => {
+              const orgEmployees = strictBranchEmployees || [];
+              const orgIds = new Set(orgEmployees.map(e => String(e.id)));
+              const orgRoots = orgEmployees.filter(e => !e.managerId || !orgIds.has(String(e.managerId)));
+              const orgManagers = orgEmployees.filter(m => orgEmployees.some(e => e.managerId === m.id));
+              return (
               <div className="space-y-4">
-                <p className="text-xs text-slate-400">Organization chart — who reports to whom. Set <strong className="text-slate-300">Reports To</strong> on each employee to build the tree. Managers approve leave for their direct reports.</p>
+                <p className="text-xs text-slate-400">Organization chart{!showAllBranchesScope && strictActiveBranchId ? ` (${(branches || []).find(b => String(b.id) === String(strictActiveBranchId))?.name || 'selected branch'})` : ' (all locations)'} — who reports to whom. Set <strong className="text-slate-300">Reports To</strong> on each employee to build the tree. Managers approve leave for their direct reports.</p>
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  {/* Tree roots: no manager */}
+                  {/* Tree roots: no manager in current branch scope */}
                   <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
                     <h4 className="text-xs font-bold text-white uppercase tracking-wider border-b border-slate-700 pb-2">Hierarchy</h4>
-                    {employees.length === 0 ? (
-                      <p className="text-xs text-slate-500">Add employees and assign managers to see the chart.</p>
+                    {orgEmployees.length === 0 ? (
+                      <p className="text-xs text-slate-500">No employees in this location scope. Add employees and assign managers to see the chart.</p>
                     ) : (
                       <div className="space-y-3">
-                        {employees.filter(e => !e.managerId).map(root => {
+                        {orgRoots.map(root => {
                           const renderNode = (emp, depth = 0) => {
-                            const reports = employees.filter(r => r.managerId === emp.id);
+                            const reports = orgEmployees.filter(r => r.managerId === emp.id && r.id !== emp.id);
                             return (
                               <div key={emp.id} className="space-y-1">
                                 <div className={`flex items-center gap-2 p-2 rounded-lg border ${depth === 0 ? 'bg-emerald-500/10 border-emerald-500/40' : 'bg-slate-950 border-slate-800'}`} style={{ marginLeft: depth * 16 }}>
@@ -8520,8 +9275,8 @@ export default function App() {
                           };
                           return renderNode(root, 0);
                         })}
-                        {employees.filter(e => !e.managerId).length === 0 && (
-                          <p className="text-xs text-amber-400">Every employee has a manager assigned — set at least one top-level employee with no manager.</p>
+                        {orgRoots.length === 0 && (
+                          <p className="text-xs text-amber-400">Every employee has a manager assigned within this branch — set at least one top-level employee with no manager.</p>
                         )}
                       </div>
                     )}
@@ -8529,13 +9284,13 @@ export default function App() {
                   <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
                     <h4 className="text-xs font-bold text-white uppercase tracking-wider border-b border-slate-700 pb-2">Manager → Direct Reports</h4>
                     <div className="space-y-2 max-h-96 overflow-y-auto">
-                      {employees.filter(m => employees.some(e => e.managerId === m.id)).length === 0 ? (
-                        <p className="text-xs text-slate-500">No managers with reports yet.</p>
-                      ) : employees.filter(m => employees.some(e => e.managerId === m.id)).map(mgr => (
+                      {orgManagers.length === 0 ? (
+                        <p className="text-xs text-slate-500">No managers with reports in this location.</p>
+                      ) : orgManagers.map(mgr => (
                         <div key={mgr.id} className="bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs">
                           <p className="font-bold text-emerald-400">{mgr.name} <span className="text-slate-500 font-normal">({mgr.position || mgr.department})</span></p>
                           <ul className="mt-1 space-y-0.5 text-slate-300">
-                            {employees.filter(e => e.managerId === mgr.id).map(r => (
+                            {orgEmployees.filter(e => e.managerId === mgr.id).map(r => (
                               <li key={r.id} className="flex justify-between gap-2">
                                 <span>↳ {r.name}</span>
                                 <span className="text-slate-500">{r.position || '—'}</span>
@@ -8548,7 +9303,8 @@ export default function App() {
                   </div>
                 </div>
               </div>
-            )}
+              );
+            })()}
 
                         {effectiveHrSubTab === 'leave' && (
               <div className="space-y-4">
@@ -8570,7 +9326,7 @@ export default function App() {
                         for (let i = 0; i < startPad; i++) cells.push(<div key={`p${i}`} className="h-14 bg-slate-950/40 rounded"></div>);
                         for (let day = 1; day <= daysInMonth; day++) {
                           const ds = `${y}-${String(m).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-                          const onLeave = (leaveRequests || []).filter(lr => {
+                          const onLeave = (strictBranchLeaveRequests || []).filter(lr => {
                             if ((lr.status || '') !== 'Approved') return false;
                             const a = String(lr.startDate || '').slice(0,10);
                             const b = String(lr.endDate || '').slice(0,10);
@@ -8594,7 +9350,7 @@ export default function App() {
                   <p className="text-xs text-slate-400">Leave requests & balances</p>
                   <div className="flex flex-wrap gap-2 items-center">
                     <SearchableSelect value={leaveStatusFilter} onChange={e=>setLeaveStatusFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Leave Statuses</option>{['Pending','Approved','Rejected'].map(v=><option key={v}>{v}</option>)}</SearchableSelect>
-                    <SearchableSelect value={leaveApproverFilter} onChange={e=>setLeaveApproverFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Approvers</option>{employees.map(e=><option key={e.id} value={e.name}>{e.name}</option>)}</SearchableSelect>
+                    <SearchableSelect value={leaveApproverFilter} onChange={e=>setLeaveApproverFilter(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-2 text-xs text-white"><option value="">All Approvers</option>{strictBranchEmployees.map(e=><option key={e.id} value={e.name}>{e.name}</option>)}</SearchableSelect>
                     {(isAdminUser || canCreate('hr')) && (
                       <button onClick={() => { setLeaveForm({ employeeId: (isAdminUser || canUpdate('hr') || canUpdate('employees')) ? '' : (currentEmployeeRecord?.id || ''), leaveType: (hrSettings.leaveTypes||[])[0] || 'Annual', startDate: '', endDate: '', reason: '' }); setLeaveModalOpen(true); }} className="px-3 py-2 bg-emerald-500 text-slate-950 text-xs font-bold rounded flex items-center gap-1"><Plus className="w-3.5 h-3.5" /> New Leave Request</button>
                     )}
@@ -8616,9 +9372,9 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-700">
-                      {filterOwn('hr', leaveRequests).filter(lr => (!leaveStatusFilter || lr.status===leaveStatusFilter) && (!leaveApproverFilter || (lr.approvedBy===leaveApproverFilter || lr.managerName===leaveApproverFilter))).length === 0 ? (
+                      {filterOwn('hr', strictBranchLeaveRequests).filter(lr => (!leaveStatusFilter || lr.status===leaveStatusFilter) && (!leaveApproverFilter || (lr.approvedBy===leaveApproverFilter || lr.managerName===leaveApproverFilter))).length === 0 ? (
                         <tr><td colSpan={9} className="py-4 text-center text-slate-500">No leave requests.</td></tr>
-                      ) : filterOwn('hr', leaveRequests).filter(lr => (!leaveStatusFilter || lr.status===leaveStatusFilter) && (!leaveApproverFilter || (lr.approvedBy===leaveApproverFilter || lr.managerName===leaveApproverFilter))).map(lr => (
+                      ) : filterOwn('hr', strictBranchLeaveRequests).filter(lr => (!leaveStatusFilter || lr.status===leaveStatusFilter) && (!leaveApproverFilter || (lr.approvedBy===leaveApproverFilter || lr.managerName===leaveApproverFilter))).map(lr => (
                         <tr key={lr.id} className="hover:bg-slate-700/40 cursor-pointer" onClick={() => setSelectedLeave({ ...lr })}>
                           <td className="py-2 px-3 font-semibold text-white">{lr.employeeName}</td>
                           <td className="py-2 px-3">{lr.leaveType}</td>
@@ -8654,10 +9410,10 @@ export default function App() {
                 <div className="flex justify-between items-center gap-2 flex-wrap">
                   <div>
                   <p className="text-xs text-slate-400">Payroll records ({hrSettings.payrollCycle} cycle, pay day {hrSettings.payDay})</p>
-                  <p className="text-[10px] text-slate-500 mt-1">Statutory totals (all records): PAYE {shopProfile.currency} {payrollStatutorySummary.paye.toLocaleString()} · NSSF {shopProfile.currency} {payrollStatutorySummary.nssf.toLocaleString()} · SHA {shopProfile.currency} {payrollStatutorySummary.sha.toLocaleString()}</p>
+                  <p className="text-[10px] text-slate-500 mt-1">Statutory totals (current location scope): PAYE {shopProfile.currency} {payrollStatutorySummary.paye.toLocaleString()} · NSSF {shopProfile.currency} {payrollStatutorySummary.nssf.toLocaleString()} · SHA {shopProfile.currency} {payrollStatutorySummary.sha.toLocaleString()}</p>
                 </div>
                   <div className="flex gap-2">
-                    <button type="button" onClick={() => exportRowsAsPdf('Payroll Report', filterOwn('payroll', payrollRecords || []).map(p => ({ id: p.id, employee: p.employeeName, period: p.period, basic: p.basicSalary, allowances: p.allowances, deductions: p.deductions, net: p.netPay, status: p.status })))} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded flex items-center gap-1"><Download className="w-3.5 h-3.5" /> Download PDF</button>
+                    <button type="button" onClick={() => exportRowsAsPdf('Payroll Report', filterOwn('payroll', strictBranchPayrollRecords || []).map(p => ({ id: p.id, employee: p.employeeName, period: p.period, basic: p.basicSalary, allowances: p.allowances, deductions: p.deductions, net: p.netPay, status: p.status })))} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded flex items-center gap-1"><Download className="w-3.5 h-3.5" /> Download PDF</button>
                     <button onClick={() => window.print()} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded flex items-center gap-1"><Printer className="w-3.5 h-3.5" /> Print List</button>
                     {(isAdminUser || canCreate('payroll')) && (
                       <button onClick={() => { setPayrollForm({ employeeId: '', period: new Date().toISOString().slice(0,7), notes: '', allowanceItems: { Housing: 0, Transport: 0, Airtime: 0, Bonus: 0, Other: 0 }, allowanceOtherSpec: '', deductionItems: { PAYE: 0, 'NHL/Housing Levy': 0, NSSF: 0, SHA: 0, Loan: 0, Pension: 0, Other: 0 }, deductionOtherSpec: '' }); setPayrollModalOpen(true); }} className="px-3 py-2 bg-emerald-500 text-slate-950 text-xs font-bold rounded flex items-center gap-1"><Plus className="w-3.5 h-3.5" /> Generate Payroll</button>
@@ -8679,9 +9435,9 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-700">
-                      {payrollRecords.length === 0 ? (
-                        <tr><td colSpan={8} className="py-8 text-center text-slate-500">No payroll records yet.</td></tr>
-                      ) : filterOwn('payroll', payrollRecords).map(pr => (
+                      {filterOwn('payroll', strictBranchPayrollRecords).length === 0 ? (
+                        <tr><td colSpan={8} className="py-8 text-center text-slate-500">No payroll records for this location.</td></tr>
+                      ) : filterOwn('payroll', strictBranchPayrollRecords).map(pr => (
                         <tr key={pr.id} className="hover:bg-slate-700/40 cursor-pointer" onClick={() => {
                           let ab = pr.allowanceBreakdown, db = pr.deductionBreakdown;
                           try { if (typeof ab === 'string') ab = JSON.parse(ab || '{}'); } catch (_) { ab = {}; }
@@ -9301,16 +10057,16 @@ export default function App() {
               <div className={`grid grid-cols-1 sm:grid-cols-3 gap-4 ${canViewReportSection('reportHrSummary') ? '' : 'hidden'}`}>
                 <div className="bg-slate-800 p-4 rounded-xl border border-slate-700">
                   <p className="text-[10px] text-slate-400 uppercase">Total Employees</p>
-                  <p className="text-2xl font-bold text-white mt-1">{(branchEmployees || employees).length}</p>
-                  <p className="text-[10px] text-emerald-400 mt-1">{(branchEmployees || employees).filter(e => e.status === 'Active').length} active</p>
+                  <p className="text-2xl font-bold text-white mt-1">{(strictBranchEmployees || []).length}</p>
+                  <p className="text-[10px] text-emerald-400 mt-1">{(strictBranchEmployees || []).filter(e => e.status === 'Active').length} active</p>
                 </div>
                 <div className="bg-slate-800 p-4 rounded-xl border border-slate-700">
                   <p className="text-[10px] text-slate-400 uppercase">Total Gross Salary</p>
-                  <p className="text-2xl font-bold text-emerald-400 mt-1">{shopProfile.currency} {(branchEmployees || employees).reduce((s, e) => s + (parseFloat(e.salary) || 0), 0).toLocaleString()}</p>
+                  <p className="text-2xl font-bold text-emerald-400 mt-1">{shopProfile.currency} {(strictBranchEmployees || []).reduce((s, e) => s + (parseFloat(e.salary) || 0), 0).toLocaleString()}</p>
                 </div>
                 <div className="bg-slate-800 p-4 rounded-xl border border-slate-700">
                   <p className="text-[10px] text-slate-400 uppercase">Total Leave Balance</p>
-                  <p className="text-2xl font-bold text-sky-400 mt-1">{(branchEmployees || employees).reduce((s, e) => s + (parseFloat(e.leaveBalance) || 0), 0)} days</p>
+                  <p className="text-2xl font-bold text-sky-400 mt-1">{(strictBranchEmployees || []).reduce((s, e) => s + (parseFloat(e.leaveBalance) || 0), 0)} days</p>
                 </div>
               </div>
               <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 overflow-x-auto">
@@ -9329,10 +10085,10 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-700">
-                    {(branchEmployees || employees).length === 0 ? (
+                    {(strictBranchEmployees || []).length === 0 ? (
                       <tr><td colSpan={7} className="py-6 text-center text-slate-500">No employees registered.</td></tr>
-                    ) : (branchEmployees || employees).map(emp => {
-                      const received = (payrollRecords || []).filter(p => {
+                    ) : (strictBranchEmployees || []).map(emp => {
+                      const received = (strictBranchPayrollRecords || []).filter(p => {
                         if (p.employeeId !== emp.id || p.status !== 'Paid') return false;
                         if (reportTimeframe === 'custom' && reportStartDate && reportEndDate) {
                           const d = String(p.paidDate || p.period || '').slice(0, 10);
@@ -9411,7 +10167,7 @@ export default function App() {
                   <p className="text-[10px] text-slate-500 mb-2">Tracked items with no sales in the selected period.</p>
                   <div className="max-h-44 overflow-y-auto text-[11px] space-y-1">
                     {(deadStockRows||[]).length === 0 ? <p className="text-slate-500">None detected.</p> : (deadStockRows||[]).map(i => (
-                      <div key={i.id} className="flex justify-between"><span className="text-white">{i.name}</span><span className="text-slate-400">Qty {i.quantity}</span></div>
+                      <div key={i.id} className="flex justify-between"><span className="text-white">{i.name}</span><span className="text-slate-400">Qty {getItemLocationQuantity(i, activeLocKey || 'all')}</span></div>
                     ))}
                   </div>
                 </div>
@@ -9420,7 +10176,7 @@ export default function App() {
                   <p className="text-[10px] text-slate-500 mb-2">View only — not clickable for restock.</p>
                   <div className="max-h-44 overflow-y-auto text-[11px] space-y-1">
                     {(lowStockAlertList||[]).length === 0 ? <p className="text-slate-500">All tracked items above threshold.</p> : (lowStockAlertList||[]).map(i => (
-                      <div key={i.id} className="flex justify-between gap-2"><span className="text-white">{i.name}</span><span className="text-red-400 font-bold">Qty {i.quantity} / alert {i.lowStockAlert || 3}</span></div>
+                      <div key={i.id} className="flex justify-between gap-2"><span className="text-white">{i.name}</span><span className="text-red-400 font-bold">Qty {getItemLocationQuantity(i, activeLocKey || 'all')} / alert {i.lowStockAlert || 3}</span></div>
                     ))}
                   </div>
                 </div>
@@ -9473,16 +10229,21 @@ export default function App() {
                   <>
             {/* SECTION 5: CUSTOMER STATEMENT HEADER & SECTION */}
             <div className={`space-y-4 ${canViewReportSection('reportCustomerStatement') ? '' : 'hidden'}`}>
-              <h3 className="text-base font-bold text-white border-b border-slate-700 pb-2">Customer Statement</h3>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 pb-2">
+                <h3 className="text-base font-bold text-white">Customer Statement</h3>
+                <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-[10px] font-semibold text-sky-300">
+                  Scope: {showAllBranchesScope ? 'All Locations (All Branches Privilege)' : ((branches || []).find(b => String(b.id) === String(strictActiveBranchId))?.name || strictActiveBranchId || 'Current Location')}
+                </span>
+              </div>
               <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-700 pb-3">
                   <div>
                     <h4 className="font-bold text-white text-xs uppercase tracking-wider">👤 Customer Account Statement Report</h4>
-                    <p className="text-[11px] text-slate-400 mt-0.5">Select a customer to view their complete order statement, payment records, and balances.</p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">Select a customer to view their complete order statement, payment records, and balances{showAllBranchesScope ? '' : ' for this branch'}.</p>
                   </div>
                   <SearchableSelect value={reportStatementCustomer} onChange={e => setReportStatementCustomer(e.target.value)} className="bg-slate-900 border border-slate-700 text-xs rounded px-3 py-2 text-emerald-400 font-bold">
                     <option value="">-- Choose Customer Statement --</option>
-                    {(customers || []).map(c => <option key={c.id} value={c.name}>{c.name} ({c.location})</option>)}
+                    {(strictBranchCustomers || []).map(c => <option key={c.id} value={c.name}>{c.name} ({c.location || c.branchId || 'Branch'})</option>)}
                   </SearchableSelect>
                 </div>
 
@@ -9491,30 +10252,37 @@ export default function App() {
                     <div className="flex justify-between items-center text-xs border-b border-slate-800 pb-2">
                       <div>
                         <p className="font-bold text-white text-sm">{reportStatementCustomer}</p>
-                        <p className="text-[10px] text-slate-400">Statement generated for all recorded orders</p>
+                        <p className="text-[10px] text-slate-400">Statement generated for {showAllBranchesScope ? 'all locations' : 'selected branch'} orders</p>
                       </div>
-                      <div className="flex flex-wrap gap-2 items-center">
-                        <span className="bg-emerald-500/20 text-emerald-400 px-2 py-1 rounded font-bold">
-                          Total Spent: {shopProfile.currency} {(sales || []).filter(s => s.customerName === reportStatementCustomer).reduce((sum, s) => sum + s.totalAmount, 0).toLocaleString()}
-                        </span>
-                        <button type="button" onClick={() => {
-                          const rows = (sales || []).filter(s => s.customerName === reportStatementCustomer);
-                          const total = rows.reduce((sum, s) => sum + (s.totalAmount || 0), 0);
-                          const paid = rows.reduce((sum, s) => sum + (s.paidAmount || 0), 0);
-                          const bal = rows.reduce((sum, s) => sum + (s.balanceDue || 0), 0);
-                          const trs = rows.map(s => `<tr><td>${s.id||''}</td><td>${s.date ? new Date(s.date).toLocaleDateString() : ''}</td><td>${s.saleType||''}</td><td>${s.totalAmount||0}</td><td>${s.paidAmount||0}</td><td>${s.balanceDue||0}</td></tr>`).join('');
-                          const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Statement ${reportStatementCustomer}</title>
-                            <style>body{font-family:Arial,sans-serif;padding:24px;color:#111}table{width:100%;border-collapse:collapse;margin-top:12px}td,th{border:1px solid #ccc;padding:6px;text-align:left;font-size:12px}h1{font-size:18px}</style></head><body>
-                            <h1>Customer Statement — ${shopProfile.name||''}</h1>
-                            <p><b>${reportStatementCustomer}</b><br/>Generated ${new Date().toLocaleString()}</p>
-                            <p>Total: ${shopProfile.currency} ${total.toLocaleString()} · Paid: ${shopProfile.currency} ${paid.toLocaleString()} · Balance: ${shopProfile.currency} ${bal.toLocaleString()}</p>
-                            <table><thead><tr><th>Tx</th><th>Date</th><th>Type</th><th>Amount</th><th>Paid</th><th>Balance</th></tr></thead><tbody>${trs}</tbody></table>
-                            </body></html>`;
-                          const tableHtml = `<table><thead><tr><th>Tx</th><th>Date</th><th>Type</th><th>Amount</th><th>Paid</th><th>Balance</th></tr></thead><tbody>${trs}</tbody></table>`;
-                          const extra = `<p>Total: ${shopProfile.currency} ${total.toLocaleString()} · Paid: ${shopProfile.currency} ${paid.toLocaleString()} · Balance: ${shopProfile.currency} ${bal.toLocaleString()}</p>`;
-                          downloadReportPdf('Customer Statement — ' + reportStatementCustomer, tableHtml, extra);
-                        }} className="px-2 py-1 bg-sky-500/20 text-sky-400 text-[10px] font-bold rounded">Download PDF</button>
-                      </div>
+                      {(() => {
+                        const stmtCust = (strictBranchCustomers || []).find(c => c.name === reportStatementCustomer);
+                        const stmtCredBal = parseFloat(stmtCust?.creditBalance) || 0;
+                        const stmtRows = (strictBranchSales || []).filter(s => s.customerName === reportStatementCustomer);
+                        const stmtSpent = stmtRows.reduce((sum, s) => sum + (parseFloat(s.totalAmount) || 0), 0);
+                        const stmtBal = stmtRows.reduce((sum, s) => sum + (parseFloat(s.balanceDue) || 0), 0);
+                        return (
+                          <div className="flex flex-wrap gap-2 items-center">
+                            <span className="bg-emerald-500/20 text-emerald-400 px-2 py-1 rounded font-bold">
+                              Total Spent: {shopProfile.currency} {stmtSpent.toLocaleString()}
+                            </span>
+                            <span className="bg-amber-500/20 text-amber-400 px-2 py-1 rounded font-bold">
+                              Unpaid Balance: {shopProfile.currency} {stmtBal.toLocaleString()}
+                            </span>
+                            <span className="bg-sky-500/20 text-sky-400 px-2 py-1 rounded font-bold">
+                              Account Credit: {shopProfile.currency} {stmtCredBal.toLocaleString()}
+                            </span>
+                            <button type="button" onClick={() => {
+                              const total = stmtSpent;
+                              const paid = stmtRows.reduce((sum, s) => sum + (s.paidAmount || 0), 0);
+                              const bal = stmtBal;
+                              const trs = stmtRows.map(s => `<tr><td>${s.id||''}</td><td>${s.date ? new Date(s.date).toLocaleDateString() : ''}</td><td>${s.saleType||''}</td><td>${s.totalAmount||0}</td><td>${s.paidAmount||0}</td><td>${s.balanceDue||0}</td></tr>`).join('');
+                              const tableHtml = `<table><thead><tr><th>Tx</th><th>Date</th><th>Type</th><th>Amount</th><th>Paid</th><th>Balance</th></tr></thead><tbody>${trs}</tbody></table>`;
+                              const extra = `<p>Total: ${shopProfile.currency} ${total.toLocaleString()} · Paid: ${shopProfile.currency} ${paid.toLocaleString()} · Balance Due: ${shopProfile.currency} ${bal.toLocaleString()} · Account Credit: ${shopProfile.currency} ${stmtCredBal.toLocaleString()}</p>`;
+                              downloadReportPdf('Customer Statement — ' + reportStatementCustomer, tableHtml, extra);
+                            }} className="px-2 py-1 bg-sky-500/20 text-sky-400 text-[10px] font-bold rounded">Download PDF</button>
+                          </div>
+                        );
+                      })()}
                     </div>
                     <div className="overflow-x-auto">
                       <table className="w-full text-left text-xs text-slate-300">
@@ -9529,10 +10297,10 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-800">
-                          {(sales || []).filter(s => s.customerName === reportStatementCustomer).length === 0 ? (
+                          {(strictBranchSales || []).filter(s => s.customerName === reportStatementCustomer).length === 0 ? (
                             <tr><td colSpan={6} className="py-4 text-center text-slate-400">No transaction records found for this customer.</td></tr>
                           ) : (
-                            (sales || []).filter(s => s.customerName === reportStatementCustomer).map(s => (
+                            (strictBranchSales || []).filter(s => s.customerName === reportStatementCustomer).map(s => (
                               <tr key={s.id} className="hover:bg-slate-800/40">
                                 <td className="py-2 px-2 font-mono text-emerald-400">{s.id}</td>
                                 <td className="py-2 px-2">{s.date ? new Date(s.date).toLocaleDateString() : 'N/A'}</td>
@@ -9658,15 +10426,22 @@ export default function App() {
                           </SearchableSelect>
                         </div>
                       )}
-                      {['sales-revenue','gross-profit','expense-analysis','chart-of-accounts','tax-summary'].includes(finReportTab) && (
-                        <div>
-                          <label className="text-slate-500 text-[10px] block">Branch</label>
+                      <div>
+                        <label className="text-slate-500 text-[10px] block">Branch</label>
+                        {finReportTab === 'branch-profitability' ? (
                           <SearchableSelect value={finBranchId} onChange={e => setFinBranchId(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1.5 text-white">
-                            <option value="">All locations</option>
-                            {(branches || []).map(b => <option key={b.id} value={b.id}>{b.name || b.id}</option>)}
+                            {hasViewAllBranchesPriv && <option value="all">All locations (compare branches)</option>}
+                            {(accessibleBranches || branches || []).map(b => <option key={b.id} value={b.id}>{b.name || b.id}</option>)}
                           </SearchableSelect>
-                        </div>
-                      )}
+                        ) : (
+                          <SearchableSelect value={(finBranchId && finBranchId !== 'all') ? finBranchId : (strictActiveBranchId || accessibleBranches[0]?.id || '')} onChange={e => setFinBranchId(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1.5 text-white">
+                            {finBranchId === '' && strictActiveBranchId && (
+                              <option value={strictActiveBranchId}>Current ({(branches || []).find(b => String(b.id) === String(strictActiveBranchId))?.name || strictActiveBranchId})</option>
+                            )}
+                            {(accessibleBranches || []).map(b => <option key={b.id} value={b.id}>{b.name || b.id}</option>)}
+                          </SearchableSelect>
+                        )}
+                      </div>
                       {finReportTab === 'comparative' && (
                         <>
                           <div>
@@ -9694,7 +10469,10 @@ export default function App() {
                           if (finFrom) q.set('from', finFrom);
                           if (finTo) q.set('to', finTo);
                           if (finGroupBy) q.set('groupBy', finGroupBy);
-                          if (finBranchId) q.set('branchId', finBranchId);
+                          const effBranch = finReportTab === 'branch-profitability'
+                            ? ((finBranchId === 'all' && hasViewAllBranchesPriv) ? 'all' : (finBranchId && finBranchId !== 'all' ? finBranchId : (showAllBranchesScope ? 'all' : (strictActiveBranchId || accessibleBranches[0]?.id || ''))))
+                            : ((finBranchId && finBranchId !== 'all') ? finBranchId : (strictActiveBranchId || accessibleBranches[0]?.id || ''));
+                          if (effBranch) q.set('branchId', effBranch);
                           if (finAccountCode) q.set('accountCode', finAccountCode);
                           if (finReportTab === 'comparative') {
                             if (finCompareFrom) q.set('compareFrom', finCompareFrom);
@@ -9774,6 +10552,13 @@ export default function App() {
                       <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 space-y-3 text-xs">
                         {finReportTab === 'pnl' && (
                           <>
+                            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                              <div className="bg-slate-950 p-2 rounded border border-slate-700"><p className="text-[10px] text-slate-500">Revenue (Net of Tax)</p><p className="font-bold text-emerald-400">{shopProfile.currency} {Number(finReportData.totalIncome||0).toLocaleString()}</p></div>
+                              <div className="bg-slate-950 p-2 rounded border border-slate-700"><p className="text-[10px] text-slate-500">COGS</p><p className="font-bold text-amber-300">{shopProfile.currency} {Number(finReportData.cogs||0).toLocaleString()}</p></div>
+                              <div className="bg-slate-950 p-2 rounded border border-slate-700"><p className="text-[10px] text-slate-500">Gross Profit</p><p className={`font-bold ${(finReportData.grossProfit ?? ((finReportData.totalIncome||0) - (finReportData.cogs||0))) >= 0 ? 'text-sky-400' : 'text-red-400'}`}>{shopProfile.currency} {Number(finReportData.grossProfit ?? ((finReportData.totalIncome||0) - (finReportData.cogs||0))).toLocaleString()}</p></div>
+                              <div className="bg-slate-950 p-2 rounded border border-slate-700"><p className="text-[10px] text-slate-500">Operating Expenses</p><p className="font-bold text-amber-400">{shopProfile.currency} {Number(finReportData.operatingExpenses ?? Math.max(0, (finReportData.totalExpense||0) - (finReportData.cogs||0))).toLocaleString()}</p></div>
+                              <div className="bg-slate-950 p-2 rounded border border-slate-700"><p className="text-[10px] text-slate-500">Net Profit</p><p className={`font-bold ${(finReportData.netProfit||0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{shopProfile.currency} {Number(finReportData.netProfit||0).toLocaleString()}</p></div>
+                            </div>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                               <div>
                                 <h4 className="font-bold text-emerald-400 mb-1">Income</h4>
@@ -9781,9 +10566,9 @@ export default function App() {
                                 <div className="flex justify-between font-bold pt-1"><span>Total income</span><span className="text-emerald-400">{shopProfile.currency} {Number(finReportData.totalIncome||0).toLocaleString()}</span></div>
                               </div>
                               <div>
-                                <h4 className="font-bold text-amber-400 mb-1">Expenses</h4>
-                                {(finReportData.expenses || []).map(r => <div key={r.code} className="flex justify-between py-0.5 border-b border-slate-800"><span className="text-slate-300">{r.code} {r.name}</span><span className="text-amber-400">{shopProfile.currency} {Number(r.amount).toLocaleString()}</span></div>)}
-                                <div className="flex justify-between font-bold pt-1"><span>Total expenses</span><span className="text-amber-400">{shopProfile.currency} {Number(finReportData.totalExpense||0).toLocaleString()}</span></div>
+                                <h4 className="font-bold text-amber-400 mb-1">COGS &amp; Operating Expenses</h4>
+                                {(finReportData.expenses || []).map((r, i) => <div key={r.code + '-' + i} className="flex justify-between py-0.5 border-b border-slate-800"><span className="text-slate-300">{r.code} {r.name}</span><span className="text-amber-400">{shopProfile.currency} {Number(r.amount).toLocaleString()}</span></div>)}
+                                <div className="flex justify-between font-bold pt-1"><span>Total COGS &amp; Expenses</span><span className="text-amber-400">{shopProfile.currency} {Number(finReportData.totalExpense||0).toLocaleString()}</span></div>
                               </div>
                             </div>
                             <p className="text-sm font-bold text-white">Net profit: <span className={(finReportData.netProfit||0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>{shopProfile.currency} {Number(finReportData.netProfit||0).toLocaleString()}</span></p>
@@ -9917,25 +10702,37 @@ export default function App() {
                   </div>
                 )}
 
-                {effectiveReportSubTab === 'ledger' && canViewReportSection('reportLedger') && (
+                {effectiveReportSubTab === 'ledger' && canViewReportSection('reportLedger') && (() => {
+                  const effLedgerBranch = (ledgerBranchId && ledgerBranchId !== 'all') ? ledgerBranchId : (strictActiveBranchId || activeLocKey || accessibleBranches[0]?.id || '');
+                  return (
                   <div className="bg-slate-900 p-5 rounded-xl border border-slate-700 space-y-4">
                     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
                       <div>
                         <h4 className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Accounting Ledger (Phases 1–4)</h4>
-                        <p className="text-[10px] text-slate-500 mt-0.5">Auto journals, trial balance, period lock, manual entries, and void/reversal. Bank reconciliation remains under Settings → Bank Reconciliation.</p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">Auto journals, trial balance, period lock, manual entries, and void/reversal. Scoped strictly to selected branch.</p>
                       </div>
-                      <button type="button" className="px-3 py-1.5 bg-emerald-500 text-slate-950 text-xs font-bold rounded" onClick={async () => {
-                        setLedgerLoading(true);
-                        try {
-                          const [tr, jr] = await Promise.all([
-                            apiFetch('/api/ledger-trial-balance'),
-                            apiFetch('/api/ledger-journals')
-                          ]);
-                          if (tr.ok) setLedgerTrial(await tr.json());
-                          if (jr.ok) { const d = await jr.json(); setLedgerJournals(d.journals || []); }
-                        } catch (e) {}
-                        setLedgerLoading(false);
-                      }}>{ledgerLoading ? 'Loading…' : 'Refresh ledger'}</button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {(accessibleBranches || []).length > 0 && (
+                          <SearchableSelect value={effLedgerBranch} onChange={e => setLedgerBranchId(e.target.value)} className="bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs text-white">
+                            {(accessibleBranches || []).map(b => <option key={b.id} value={b.id}>{b.name || b.id}</option>)}
+                          </SearchableSelect>
+                        )}
+                        <button type="button" className="px-3 py-1.5 bg-emerald-500 text-slate-950 text-xs font-bold rounded" onClick={async () => {
+                          setLedgerLoading(true);
+                          try {
+                            const bq = effLedgerBranch ? `?branchId=${encodeURIComponent(effLedgerBranch)}` : '';
+                            const [tr, jr] = await Promise.all([
+                              apiFetch('/api/ledger-trial-balance' + bq),
+                              apiFetch('/api/ledger-journals' + bq)
+                            ]);
+                            if (tr.ok) setLedgerTrial(await tr.json());
+                            else { const err = await tr.json().catch(() => ({})); alert(err.error || 'Could not load trial balance'); }
+                            if (jr.ok) { const d = await jr.json(); setLedgerJournals(d.journals || []); }
+                            else { const err = await jr.json().catch(() => ({})); alert(err.error || 'Could not load journals'); }
+                          } catch (e) {}
+                          setLedgerLoading(false);
+                        }}>{ledgerLoading ? 'Loading…' : 'Refresh ledger'}</button>
+                      </div>
                     </div>
                     {ledgerTrial && (
                       <div className="space-y-2">
@@ -9962,13 +10759,21 @@ export default function App() {
                           const q = new URLSearchParams();
                           if (pnlFrom) q.set('from', pnlFrom);
                           if (pnlTo) q.set('to', pnlTo);
+                          if (effLedgerBranch) q.set('branchId', effLedgerBranch);
                           const r = await apiFetch('/api/ledger-pnl?' + q.toString());
                           if (r.ok) setLedgerPnl(await r.json());
-                          else alert('Could not load P&L');
+                          else { const err = await r.json().catch(() => ({})); alert(err.error || 'Could not load P&L'); }
                         }}>Run P&amp;L</button>
                       </div>
                       {ledgerPnl && (
                         <div className="text-[11px] space-y-2">
+                          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                            <div className="bg-slate-950 p-2 rounded border border-slate-800"><p className="text-[10px] text-slate-500">Income</p><p className="font-bold text-emerald-400">{shopProfile.currency} {Number(ledgerPnl.totalIncome||0).toLocaleString()}</p></div>
+                            <div className="bg-slate-950 p-2 rounded border border-slate-800"><p className="text-[10px] text-slate-500">COGS</p><p className="font-bold text-amber-300">{shopProfile.currency} {Number(ledgerPnl.cogs||0).toLocaleString()}</p></div>
+                            <div className="bg-slate-950 p-2 rounded border border-slate-800"><p className="text-[10px] text-slate-500">Gross Profit</p><p className="font-bold text-sky-400">{shopProfile.currency} {Number(ledgerPnl.grossProfit ?? ((ledgerPnl.totalIncome||0)-(ledgerPnl.cogs||0))).toLocaleString()}</p></div>
+                            <div className="bg-slate-950 p-2 rounded border border-slate-800"><p className="text-[10px] text-slate-500">Operating Expenses</p><p className="font-bold text-amber-400">{shopProfile.currency} {Number(ledgerPnl.operatingExpenses ?? Math.max(0,(ledgerPnl.totalExpense||0)-(ledgerPnl.cogs||0))).toLocaleString()}</p></div>
+                            <div className="bg-slate-950 p-2 rounded border border-slate-800"><p className="text-[10px] text-slate-500">Net Profit</p><p className={`font-bold ${(ledgerPnl.netProfit||0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{shopProfile.currency} {Number(ledgerPnl.netProfit||0).toLocaleString()}</p></div>
+                          </div>
                           <div className="grid grid-cols-2 gap-2">
                             <div className="bg-slate-950 p-2 rounded border border-slate-800">
                               <p className="text-slate-400 text-[10px] uppercase">Income</p>
@@ -9976,12 +10781,12 @@ export default function App() {
                               <div className="flex justify-between font-bold border-t border-slate-800 mt-1 pt-1"><span>Total</span><span className="text-emerald-400">{Number(ledgerPnl.totalIncome||0).toLocaleString()}</span></div>
                             </div>
                             <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                              <p className="text-slate-400 text-[10px] uppercase">Expenses</p>
-                              {(ledgerPnl.expenses || []).map(r => <div key={r.code} className="flex justify-between"><span>{r.name}</span><span className="text-amber-400">{Number(r.amount).toLocaleString()}</span></div>)}
+                              <p className="text-slate-400 text-[10px] uppercase">Expenses &amp; COGS</p>
+                              {(ledgerPnl.expenses || []).map((r, idx) => <div key={r.code + '-' + idx} className="flex justify-between"><span>{r.name}</span><span className="text-amber-400">{Number(r.amount).toLocaleString()}</span></div>)}
                               <div className="flex justify-between font-bold border-t border-slate-800 mt-1 pt-1"><span>Total</span><span className="text-amber-400">{Number(ledgerPnl.totalExpense||0).toLocaleString()}</span></div>
                             </div>
                           </div>
-                          <p className="text-sm font-bold text-white">Net profit: <span className={(ledgerPnl.netProfit||0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>{Number(ledgerPnl.netProfit||0).toLocaleString()}</span></p>
+                          <p className="text-sm font-bold text-white">Net profit: <span className={(ledgerPnl.netProfit||0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>{shopProfile.currency} {Number(ledgerPnl.netProfit||0).toLocaleString()}</span></p>
                         </div>
                       )}
                     </div>
@@ -10031,7 +10836,7 @@ export default function App() {
                         <div className="flex gap-2">
                           <button type="button" className="text-[10px] text-slate-400" onClick={() => setManualJournal({ ...manualJournal, lines: [...manualJournal.lines, { accountCode: '', debit: '', credit: '' }] })}>+ Line</button>
                           <button type="button" className="px-2 py-1 bg-emerald-500 text-slate-950 text-[10px] font-bold rounded" onClick={async () => {
-                            const res = await apiFetch('/api/manual-journal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(manualJournal) });
+                            const res = await apiFetch('/api/manual-journal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...manualJournal, branchId: effLedgerBranch || undefined }) });
                             const d = await res.json().catch(() => ({}));
                             if (!res.ok) return alert(d.error || 'Failed to post manual journal');
                             alert('Manual journal posted: ' + (d.id || 'ok'));
@@ -10067,7 +10872,8 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                )}
+                  );
+                })()}
 
               </div>
             </div>
@@ -10660,13 +11466,32 @@ export default function App() {
                         <p className="text-[10px] text-slate-500 mt-0.5">Tracks logins, payments, deletions (sales, purchases, expenses, inventory), sales returns & purchase returns.</p>
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
+                        <SearchableSelect value={auditUserFilter} onChange={e => setAuditUserFilter(e.target.value)} className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-[11px] text-white">
+                          <option value="">All Users</option>
+                          {[...new Set((auditLog || []).map(a => a.user).filter(Boolean))].sort().map(u => (
+                            <option key={u} value={u}>{u}</option>
+                          ))}
+                        </SearchableSelect>
                         <SearchableSelect value={auditActionFilter} onChange={e => setAuditActionFilter(e.target.value)} className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-[11px] text-white">
                           <option value="">All Actions</option>
                           <option value="login">Logins</option>
                           <option value="payment">Payments</option>
                           <option value="delete">Deletions</option>
-                          <option value="return">Returns & Approvals</option>
+                          <option value="return">Returns &amp; Approvals</option>
                         </SearchableSelect>
+                        <input type="date" value={auditDateFrom} onChange={e => setAuditDateFrom(e.target.value)} title="From date" className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-[11px] text-white" />
+                        <input type="date" value={auditDateTo} onChange={e => setAuditDateTo(e.target.value)} title="To date" className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-[11px] text-white" />
+                        {(accessibleBranches || []).length > 0 && (
+                          <SearchableSelect value={auditBranchFilter} onChange={e => setAuditBranchFilter(e.target.value)} className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-[11px] text-white">
+                            <option value="">{showAllBranchesScope ? 'All Locations' : 'Current Scope'}</option>
+                            {(accessibleBranches || []).map(b => (
+                              <option key={b.id} value={b.id}>{b.name || b.id}</option>
+                            ))}
+                          </SearchableSelect>
+                        )}
+                        {(auditUserFilter || auditActionFilter || auditDateFrom || auditDateTo || auditBranchFilter) && (
+                          <button type="button" onClick={() => { setAuditUserFilter(''); setAuditActionFilter(''); setAuditDateFrom(''); setAuditDateTo(''); setAuditBranchFilter(''); }} className="text-[10px] text-slate-400 hover:text-white underline">Reset</button>
+                        )}
                         <button type="button" onClick={async () => {
                           try {
                             const r = await apiFetch('/api/all-data');
@@ -10679,32 +11504,43 @@ export default function App() {
                             }
                           } catch (_) {}
                         }} className="text-[10px] text-sky-400 font-bold">Refresh</button>
-                        <button type="button" onClick={() => exportCSV('audit_' + new Date().toISOString().slice(0,10) + '.csv', (auditLog || []).map(a => ({ when: a.at, user: a.user, action: a.action, entity: a.entity, detail: a.detail })))} className="text-[10px] text-emerald-400 font-bold">Export CSV</button>
+                        <button type="button" onClick={() => exportCSV('audit_' + new Date().toISOString().slice(0,10) + '.csv', (auditLog || []).map(a => ({ when: a.at, user: a.user, location: (branches || []).find(b => String(b.id) === String(a.branchId))?.name || a.branchId || '', action: a.action, entity: a.entity, detail: a.detail })))} className="text-[10px] text-emerald-400 font-bold">Export CSV</button>
                         <button type="button" onClick={() => { if (window.confirm('Clear local audit log?')) { setAuditLog([]); try { localStorage.removeItem(tenantStorageKey('erp_audit_log')); localStorage.removeItem('erp_audit_log'); } catch (e) {} } }} className="text-[10px] text-red-400">Clear</button>
                       </div>
                     </div>
                     <div className="overflow-x-auto max-h-96">
-                      <table className="w-full text-left text-xs text-slate-300 min-w-[600px]">
-                        <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] sticky top-0"><tr><th className="py-2 px-2">When</th><th className="py-2 px-2">User</th><th className="py-2 px-2">Action</th><th className="py-2 px-2">Entity</th><th className="py-2 px-2">Detail</th></tr></thead>
+                      <table className="w-full text-left text-xs text-slate-300 min-w-[680px]">
+                        <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] sticky top-0"><tr><th className="py-2 px-2">When</th><th className="py-2 px-2">User</th><th className="py-2 px-2">Location</th><th className="py-2 px-2">Action</th><th className="py-2 px-2">Entity</th><th className="py-2 px-2">Detail</th></tr></thead>
                         <tbody className="divide-y divide-slate-800">
                           {(() => {
+                            const effBranchFilt = auditBranchFilter || (!showAllBranchesScope && strictActiveBranchId ? strictActiveBranchId : '');
                             const rows = (auditLog || []).filter(a => {
+                              if (auditUserFilter && String(a.user || '') !== auditUserFilter) return false;
+                              if (effBranchFilt && String(a.branchId || '') !== String(effBranchFilt)) return false;
+                              const day = String(a.at || '').slice(0, 10);
+                              if (auditDateFrom && (!day || day < auditDateFrom)) return false;
+                              if (auditDateTo && (!day || day > auditDateTo)) return false;
                               if (!auditActionFilter) return true;
                               const act = String(a.action || '').toLowerCase();
                               const ent = String(a.entity || '').toLowerCase();
                               if (auditActionFilter === 'return') return act.includes('return') || act.includes('approv') || ent.includes('return');
+                              if (auditActionFilter === 'payment') return act.includes('pay');
                               return act.includes(auditActionFilter);
                             });
-                            if (!rows.length) return <tr><td colSpan={5} className="py-4 text-center text-slate-500">No audit entries match this filter.</td></tr>;
-                            return rows.map(a => (
+                            if (!rows.length) return <tr><td colSpan={6} className="py-4 text-center text-slate-500">No audit entries match this filter.</td></tr>;
+                            return rows.map(a => {
+                              const locName = (branches || []).find(b => String(b.id) === String(a.branchId))?.name || a.branchId || '—';
+                              return (
                               <tr key={a.id}>
                                 <td className="py-1.5 px-2 whitespace-nowrap text-slate-400 tabular-nums">{a.at ? new Date(a.at).toLocaleString() : ''}</td>
                                 <td className="py-1.5 px-2 font-medium text-white">{a.user}</td>
-                                <td className="py-1.5 px-2"><span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${String(a.action||'').includes('delete') ? 'bg-rose-500/20 text-rose-300' : String(a.action||'').includes('payment') ? 'bg-emerald-500/20 text-emerald-300' : String(a.action||'').includes('login') ? 'bg-sky-500/20 text-sky-300' : 'bg-amber-500/20 text-amber-300'}`}>{a.action}</span></td>
+                                <td className="py-1.5 px-2 text-slate-400">{locName}</td>
+                                <td className="py-1.5 px-2"><span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${String(a.action||'').includes('delete') ? 'bg-rose-500/20 text-rose-300' : String(a.action||'').includes('pay') ? 'bg-emerald-500/20 text-emerald-300' : String(a.action||'').includes('login') ? 'bg-sky-500/20 text-sky-300' : 'bg-amber-500/20 text-amber-300'}`}>{a.action}</span></td>
                                 <td className="py-1.5 px-2 text-slate-300">{a.entity}</td>
                                 <td className="py-1.5 px-2 text-slate-400">{a.detail}</td>
                               </tr>
-                            ));
+                              );
+                            });
                           })()}
                         </tbody>
                       </table>
@@ -11328,6 +12164,8 @@ export default function App() {
                 <input type="text" value={customerForm.kraPin || ''} onChange={e => setCustomerForm({...customerForm, kraPin: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs" /></div>
               <div><label className="text-slate-400 block mb-1 text-xs">Loyalty Points</label>
                 <input type="number" value={customerForm.loyaltyPoints || 0} onChange={e => setCustomerForm({...customerForm, loyaltyPoints: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs" /></div>
+              <div><label className="text-slate-400 block mb-1 text-xs">Account Credit Balance ({shopProfile.currency || 'KSh'})</label>
+                <input type="number" step="any" min="0" value={customerForm.creditBalance ?? 0} onChange={e => setCustomerForm({...customerForm, creditBalance: parseFloat(e.target.value) || 0})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-sky-400 text-xs font-mono" /></div>
 
               <div>
                 <label className="text-slate-400 block mb-1 font-semibold">Sale Type Eligibility:</label>
@@ -11665,7 +12503,7 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setDuplicatingItemName('');
-                    setItemForm({ name: '', sku: '', size: '', colour: '', wholesalePrice: '', category: 'Grade A Jackets', buyingPrice: '', price: '', quantity: '', lowStockAlert: 3, trackInventory: true, status: 'Listed', photoUrl: '', varianceValues: {}, branchId: '', allLocations: false });
+                    setItemForm({ name: '', sku: '', size: '', colour: '', wholesalePrice: '', category: 'Grade A Jackets', buyingPrice: '', price: '', quantity: '', lowStockAlert: 3, trackInventory: true, status: 'Listed', photoUrl: '', varianceValues: {}, branchId: '', allLocations: false, locationMode: 'single', allowedBranches: [], locationQuantities: {} });
                   }}
                   className="text-[10px] text-slate-400 hover:text-white underline ml-2 cursor-pointer"
                 >
@@ -11748,35 +12586,147 @@ export default function App() {
                   <input required type="number" step="0.01" value={itemForm.price} onChange={e => setItemForm({...itemForm, price: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-slate-400 block mb-1">Quantity</label>
-                  <input type="number" value={itemForm.quantity} onChange={e => setItemForm({...itemForm, quantity: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" disabled={!itemForm.trackInventory} />
-                </div>
-                <div>
-                  <label className="text-slate-400 block mb-1">Low Stock Alert</label>
-                  <input type="number" value={itemForm.lowStockAlert} onChange={e => setItemForm({...itemForm, lowStockAlert: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" />
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <input type="checkbox" checked={!!itemForm.trackInventory} onChange={e => setItemForm({...itemForm, trackInventory: e.target.checked})} className="rounded" id="newItemTrack" />
-                <label htmlFor="newItemTrack" className="text-slate-300">Track inventory</label>
-              </div>
-              <div className="space-y-2 p-3 bg-slate-950 rounded border border-slate-800">
-                <div className="flex items-center gap-2">
-                  <input type="checkbox" checked={!!itemForm.allLocations} onChange={e => setItemForm({...itemForm, allLocations: e.target.checked, branchId: e.target.checked ? '' : (itemForm.branchId || activeBranchId || '')})} className="rounded" id="newItemAllLoc" />
-                  <label htmlFor="newItemAllLoc" className="text-slate-300 font-semibold">Available in all locations</label>
-                </div>
-                {!itemForm.allLocations && (
-                  <div>
-                    <label className="text-slate-400 block mb-1">Location</label>
-                    <SearchableSelect value={itemForm.branchId || activeBranchId || ''} onChange={e => setItemForm({...itemForm, branchId: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
-                      <option value="">— Select location —</option>
-                      {(accessibleBranches || branches || []).map(b => <option key={b.id} value={b.id}>{b.name}{b.isDefault ? ' (default)' : ''}</option>)}
-                    </SearchableSelect>
-                  </div>
-                )}
-              </div>
+              {(() => {
+                const locMode = itemForm.locationMode || (itemForm.allLocations ? 'all' : ((itemForm.allowedBranches || []).length > 0 ? 'multi' : 'single'));
+                const buyP = parseFloat(itemForm.buyingPrice) || 0;
+                const branchPool = accessibleBranches || branches || [];
+                const activeMulti = (itemForm.allowedBranches || []).map(String);
+                const lq = itemForm.locationQuantities || {};
+                const targetBranches = locMode === 'all'
+                  ? branchPool
+                  : locMode === 'multi'
+                    ? branchPool.filter(b => activeMulti.includes(String(b.id)))
+                    : [];
+                const totalLocQty = targetBranches.reduce((s, b) => s + (parseInt(lq[b.id], 10) || 0), 0);
+                return (
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-slate-400 block mb-1">
+                          {locMode === 'single' ? 'Quantity' : 'Total Quantity (Sum Across Locations)'}
+                        </label>
+                        <input
+                          type="number"
+                          value={locMode === 'single' ? itemForm.quantity : (itemForm.trackInventory ? totalLocQty : 0)}
+                          onChange={e => setItemForm({ ...itemForm, quantity: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white"
+                          disabled={!itemForm.trackInventory || locMode !== 'single'}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-slate-400 block mb-1">Low Stock Alert</label>
+                        <input type="number" value={itemForm.lowStockAlert} onChange={e => setItemForm({ ...itemForm, lowStockAlert: e.target.value })} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" />
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input type="checkbox" checked={!!itemForm.trackInventory} onChange={e => setItemForm({ ...itemForm, trackInventory: e.target.checked })} className="rounded" id="newItemTrack" />
+                      <label htmlFor="newItemTrack" className="text-slate-300">Track inventory</label>
+                    </div>
+                    <div className="space-y-2.5 p-3 bg-slate-950 rounded border border-slate-800">
+                      <label className="text-slate-300 font-semibold block">Location Availability &amp; Per-Location Stock</label>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {[
+                          { id: 'single', label: 'Single Location' },
+                          { id: 'multi', label: 'Selected Locations' },
+                          { id: 'all', label: 'All Locations' }
+                        ].map(opt => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => setItemForm({
+                              ...itemForm,
+                              locationMode: opt.id,
+                              allLocations: opt.id === 'all',
+                              branchId: opt.id === 'single' ? (itemForm.branchId || activeBranchId || branchPool[0]?.id || '') : ''
+                            })}
+                            className={`py-1.5 px-2 rounded text-[11px] font-bold border transition-colors ${locMode === opt.id ? 'bg-emerald-500 text-slate-950 border-emerald-500' : 'bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500'}`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      {locMode === 'single' && (
+                        <div>
+                          <label className="text-slate-400 block mb-1">Location</label>
+                          <SearchableSelect value={itemForm.branchId || activeBranchId || ''} onChange={e => setItemForm({ ...itemForm, branchId: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white">
+                            <option value="">— Select location —</option>
+                            {branchPool.map(b => <option key={b.id} value={b.id}>{b.name}{b.isDefault ? ' (default)' : ''}</option>)}
+                          </SearchableSelect>
+                        </div>
+                      )}
+
+                      {locMode === 'multi' && (
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] text-slate-400 block">Select locations where this item is available:</label>
+                          <div className="grid grid-cols-2 gap-1.5 max-h-28 overflow-y-auto">
+                            {branchPool.map(b => {
+                              const checked = activeMulti.includes(String(b.id));
+                              return (
+                                <label key={b.id} className="flex items-center gap-2 p-1.5 rounded bg-slate-900 border border-slate-800 cursor-pointer text-slate-200">
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={e => {
+                                      const next = e.target.checked
+                                        ? Array.from(new Set([...activeMulti, String(b.id)]))
+                                        : activeMulti.filter(x => x !== String(b.id));
+                                      setItemForm({ ...itemForm, allowedBranches: next });
+                                    }}
+                                  />
+                                  <span className="truncate">{b.name}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {(locMode === 'all' || locMode === 'multi') && (
+                        <div className="space-y-1.5 pt-1 border-t border-slate-800">
+                          <div className="flex justify-between text-[10px] text-slate-400">
+                            <span>Stock Balance &amp; Valuation per Location</span>
+                            {itemForm.trackInventory && (
+                              <span className="text-emerald-400 font-semibold">
+                                Total: {totalLocQty} · {shopProfile.currency} {(totalLocQty * buyP).toLocaleString()}
+                              </span>
+                            )}
+                          </div>
+                          {targetBranches.length === 0 ? (
+                            <p className="text-[10px] text-amber-400">Select at least one location above to set stock quantities.</p>
+                          ) : (
+                            <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                              {targetBranches.map(b => {
+                                const q = parseInt(lq[b.id], 10) || 0;
+                                const val = q * buyP;
+                                return (
+                                  <div key={b.id} className="flex items-center justify-between gap-2 bg-slate-900 p-2 rounded border border-slate-800">
+                                    <span className="text-slate-200 font-medium truncate flex-1">{b.name}</span>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      disabled={!itemForm.trackInventory}
+                                      value={lq[b.id] ?? 0}
+                                      onChange={e => setItemForm({
+                                        ...itemForm,
+                                        locationQuantities: { ...lq, [b.id]: Math.max(0, parseInt(e.target.value, 10) || 0) }
+                                      })}
+                                      className="w-20 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-white text-right font-mono"
+                                    />
+                                    <span className="text-[10px] text-emerald-400 font-mono min-w-[75px] text-right">
+                                      {itemForm.trackInventory ? `${shopProfile.currency} ${val.toLocaleString()}` : '∞'}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
               <div>
                 <label className="text-slate-400 block mb-1">Status</label>
                 <SearchableSelect value={itemForm.status} onChange={e => setItemForm({...itemForm, status: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
@@ -11851,35 +12801,160 @@ export default function App() {
                 <div><label className="text-slate-400 block mb-1">Buying Price</label><input type="number" value={selectedInventoryItem.buyingPrice} onChange={e => setSelectedInventoryItem({...selectedInventoryItem, buyingPrice: parseFloat(e.target.value) || 0})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /></div>
                 <div><label className="text-slate-400 block mb-1 font-semibold">Selling Price</label><input type="number" value={selectedInventoryItem.price} onChange={e => setSelectedInventoryItem({...selectedInventoryItem, price: parseFloat(e.target.value) || 0})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /></div>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div><label className="text-slate-400 block mb-1">Quantity</label><input type="number" value={selectedInventoryItem.quantity} onChange={e => setSelectedInventoryItem({...selectedInventoryItem, quantity: parseInt(e.target.value) || 0})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /></div>
-                <div>
-                  <label className="text-slate-400 block mb-1">Status</label>
-                  <SearchableSelect value={selectedInventoryItem.status} onChange={e => setSelectedInventoryItem({...selectedInventoryItem, status: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
-                    {itemStatuses.map(st => <option key={st.id} value={st.name}>{st.name}</option>)}
-                  </SearchableSelect>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-2 bg-slate-950 p-3 rounded border border-slate-800">
-                <div>
-                  <label className="text-slate-400 block mb-1 font-semibold">Track Inventory?</label>
-                  <input 
-                    type="checkbox" 
-                    checked={selectedInventoryItem.trackInventory} 
-                    onChange={e => setSelectedInventoryItem({...selectedInventoryItem, trackInventory: e.target.checked})} 
-                    className="rounded bg-slate-900 border-slate-700 text-emerald-500 w-4 h-4"
-                  />
-                </div>
-                <div>
-                  <label className="text-slate-400 block mb-1 font-semibold">Low Stock Alert Threshold</label>
-                  <input 
-                    type="number" 
-                    value={selectedInventoryItem.lowStockAlert || 3} 
-                    onChange={e => setSelectedInventoryItem({...selectedInventoryItem, lowStockAlert: parseInt(e.target.value) || 3})} 
-                    className="w-full bg-slate-900 border border-slate-700 rounded p-1 text-white"
-                  />
-                </div>
-              </div>
+              {(() => {
+                const editAllowed = parseAllowedBranches(selectedInventoryItem).map(String);
+                const editMode = selectedInventoryItem.locationMode || (isItemInAllLocations(selectedInventoryItem) ? 'all' : (editAllowed.length > 0 ? 'multi' : 'single'));
+                const editLq = parseLocationQuantities(selectedInventoryItem);
+                const buyP = parseFloat(selectedInventoryItem.buyingPrice) || 0;
+                const branchPool = accessibleBranches || branches || [];
+                const targetBranches = editMode === 'all'
+                  ? branchPool
+                  : editMode === 'multi'
+                    ? branchPool.filter(b => editAllowed.includes(String(b.id)))
+                    : [];
+                const totalLocQty = targetBranches.reduce((s, b) => s + (Number(editLq[b.id]) || 0), 0);
+                return (
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-slate-400 block mb-1">{editMode === 'single' ? 'Quantity' : 'Total Qty (Sum)'}</label>
+                        <input
+                          type="number"
+                          disabled={!selectedInventoryItem.trackInventory || editMode !== 'single'}
+                          value={editMode === 'single' ? selectedInventoryItem.quantity : (selectedInventoryItem.trackInventory ? totalLocQty : 0)}
+                          onChange={e => setSelectedInventoryItem({ ...selectedInventoryItem, quantity: parseInt(e.target.value) || 0 })}
+                          className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-slate-400 block mb-1">Status</label>
+                        <SearchableSelect value={selectedInventoryItem.status} onChange={e => setSelectedInventoryItem({ ...selectedInventoryItem, status: e.target.value })} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
+                          {itemStatuses.map(st => <option key={st.id} value={st.name}>{st.name}</option>)}
+                        </SearchableSelect>
+                      </div>
+                    </div>
+                    <div className="space-y-2 p-3 bg-slate-950 rounded border border-slate-800">
+                      <label className="text-slate-300 font-semibold block">Location Assignment &amp; Per-Location Balance</label>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {[
+                          { id: 'single', label: 'Single Location' },
+                          { id: 'multi', label: 'Selected Locations' },
+                          { id: 'all', label: 'All Locations' }
+                        ].map(opt => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => {
+                              const nextLq = { ...editLq };
+                              if ((opt.id === 'all' || opt.id === 'multi') && Object.keys(nextLq).length === 0 && selectedInventoryItem.branchId && (Number(selectedInventoryItem.quantity) || 0) > 0) {
+                                nextLq[selectedInventoryItem.branchId] = Number(selectedInventoryItem.quantity) || 0;
+                              }
+                              setSelectedInventoryItem({
+                                ...selectedInventoryItem,
+                                locationMode: opt.id,
+                                allLocations: opt.id === 'all',
+                                allowedBranches: opt.id === 'multi' ? (editAllowed.length ? editAllowed : (selectedInventoryItem.branchId ? [String(selectedInventoryItem.branchId)] : [])) : [],
+                                branchId: opt.id === 'single' ? (selectedInventoryItem.branchId || activeBranchId || branchPool[0]?.id || '') : '',
+                                locationQuantities: nextLq
+                              });
+                            }}
+                            className={`py-1.5 px-2 rounded text-[11px] font-bold border transition-colors ${editMode === opt.id ? 'bg-emerald-500 text-slate-950 border-emerald-500' : 'bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500'}`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                      {editMode === 'single' && (
+                        <div>
+                          <label className="text-slate-400 block mb-1">Location</label>
+                          <SearchableSelect value={selectedInventoryItem.branchId || activeBranchId || ''} onChange={e => setSelectedInventoryItem({ ...selectedInventoryItem, branchId: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white">
+                            <option value="">— Select location —</option>
+                            {branchPool.map(b => <option key={b.id} value={b.id}>{b.name}{b.isDefault ? ' (default)' : ''}</option>)}
+                          </SearchableSelect>
+                        </div>
+                      )}
+                      {editMode === 'multi' && (
+                        <div className="grid grid-cols-2 gap-1.5 max-h-24 overflow-y-auto">
+                          {branchPool.map(b => {
+                            const checked = editAllowed.includes(String(b.id));
+                            return (
+                              <label key={b.id} className="flex items-center gap-2 p-1.5 rounded bg-slate-900 border border-slate-800 cursor-pointer text-slate-200">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={e => {
+                                    const next = e.target.checked
+                                      ? Array.from(new Set([...editAllowed, String(b.id)]))
+                                      : editAllowed.filter(x => x !== String(b.id));
+                                    setSelectedInventoryItem({ ...selectedInventoryItem, allowedBranches: next });
+                                  }}
+                                />
+                                <span className="truncate">{b.name}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {(editMode === 'all' || editMode === 'multi') && (
+                        <div className="space-y-1.5 pt-1 border-t border-slate-800">
+                          <div className="flex justify-between text-[10px] text-slate-400">
+                            <span>Balance &amp; Valuation per Location</span>
+                            {selectedInventoryItem.trackInventory && (
+                              <span className="text-emerald-400 font-semibold">Total: {totalLocQty} · {shopProfile.currency} {(totalLocQty * buyP).toLocaleString()}</span>
+                            )}
+                          </div>
+                          <div className="space-y-1.5 max-h-36 overflow-y-auto">
+                            {targetBranches.map(b => {
+                              const q = Number(editLq[b.id]) || 0;
+                              const val = q * buyP;
+                              return (
+                                <div key={b.id} className="flex items-center justify-between gap-2 bg-slate-900 p-1.5 rounded border border-slate-800">
+                                  <span className="text-slate-200 truncate flex-1">{b.name}</span>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    disabled={!selectedInventoryItem.trackInventory}
+                                    value={editLq[b.id] ?? 0}
+                                    onChange={e => {
+                                      const nextLq = { ...editLq, [b.id]: Math.max(0, parseInt(e.target.value, 10) || 0) };
+                                      const sum = Object.values(nextLq).reduce((s, v) => s + (Number(v) || 0), 0);
+                                      setSelectedInventoryItem({ ...selectedInventoryItem, locationQuantities: nextLq, quantity: sum });
+                                    }}
+                                    className="w-20 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-white text-right font-mono"
+                                  />
+                                  <span className="text-[10px] text-emerald-400 font-mono min-w-[75px] text-right">
+                                    {selectedInventoryItem.trackInventory ? `${shopProfile.currency} ${val.toLocaleString()}` : '∞'}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 bg-slate-950 p-3 rounded border border-slate-800">
+                      <div>
+                        <label className="text-slate-400 block mb-1 font-semibold">Track Inventory?</label>
+                        <input
+                          type="checkbox"
+                          checked={!!selectedInventoryItem.trackInventory}
+                          onChange={e => setSelectedInventoryItem({ ...selectedInventoryItem, trackInventory: e.target.checked })}
+                          className="rounded bg-slate-900 border-slate-700 text-emerald-500 w-4 h-4"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-slate-400 block mb-1 font-semibold">Low Stock Alert Threshold</label>
+                        <input
+                          type="number"
+                          value={selectedInventoryItem.lowStockAlert || 3}
+                          onChange={e => setSelectedInventoryItem({ ...selectedInventoryItem, lowStockAlert: parseInt(e.target.value) || 3 })}
+                          className="w-full bg-slate-900 border border-slate-700 rounded p-1 text-white"
+                        />
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
               <div className="space-y-2 p-3 bg-slate-950 rounded border border-slate-800">
                 <label className="text-slate-300 font-semibold block">Item Image (Link Recommended or Compressed Upload)</label>
                 <input type="text" value={selectedInventoryItem.photoUrl || ''} onChange={e => setSelectedInventoryItem({...selectedInventoryItem, photoUrl: e.target.value})} placeholder="https://images.unsplash.com/..." className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" />
@@ -11988,6 +13063,21 @@ export default function App() {
                   className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs font-mono"
                 />
                 <p className="text-[10px] text-slate-500 mt-0.5">Maximum unpaid credit balance allowed before business policy triggers.</p>
+              </div>
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-sky-300 block font-semibold text-xs">Account Credit Balance ({shopProfile.currency || 'KSh'})</label>
+                  <span className="text-[10px] text-slate-500">Advance / Excess payment credit</span>
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="0"
+                  value={selectedCustomer.creditBalance ?? 0}
+                  onChange={e => setSelectedCustomer({...selectedCustomer, creditBalance: parseFloat(e.target.value) || 0})}
+                  className="w-full bg-slate-950 border border-sky-500/40 rounded p-2 text-sky-400 text-xs font-mono"
+                />
               </div>
               <div className="space-y-2 p-3 bg-slate-950 rounded border border-slate-800">
                 <div className="flex items-center gap-2">
@@ -12128,12 +13218,22 @@ export default function App() {
               <h4 className="font-bold text-white text-sm">Transaction Details & Payment Update: #{selectedSaleItem.id}</h4>
               <button onClick={() => setSelectedSaleItem(null)} className="text-slate-400">✕</button>
             </div>
+            {(() => {
+              const payCust = (customers || []).find(c => (selectedSaleItem.customerId && c.id === selectedSaleItem.customerId) || c.name === selectedSaleItem.customerName);
+              const payCustCredit = parseFloat(payCust?.creditBalance) || 0;
+              return (
             <div className="space-y-3 text-xs">
               <div className="grid grid-cols-2 gap-2 bg-slate-950 p-3 rounded border border-slate-800">
                 <div><span className="text-slate-400 block">Customer</span><strong className="text-white text-sm">{selectedSaleItem.customerName}</strong></div>
                 <div><span className="text-slate-400 block">Sale Type</span><strong className="text-emerald-400 text-sm">{selectedSaleItem.saleType}</strong></div>
                 <div><span className="text-slate-400 block mt-2">Total Amount</span><strong className="text-emerald-400 text-sm">{shopProfile.currency} {selectedSaleItem.totalAmount?.toLocaleString()}</strong></div>
                 <div><span className="text-slate-400 block mt-2">Balance Due</span><strong className="text-amber-400 text-sm">{shopProfile.currency} {selectedSaleItem.balanceDue?.toLocaleString()}</strong></div>
+                {payCustCredit > 0 && (
+                  <div className="col-span-2 pt-1 border-t border-slate-800 flex justify-between items-center">
+                    <span className="text-sky-300">Available Customer Account Credit</span>
+                    <strong className="text-sky-400 text-sm">{shopProfile.currency} {payCustCredit.toLocaleString()}</strong>
+                  </div>
+                )}
               </div>
               <div className="bg-slate-950 p-3 rounded border border-slate-800 space-y-2">
                 <p className="text-[10px] font-bold text-slate-400 uppercase">Payment History</p>
@@ -12195,11 +13295,13 @@ export default function App() {
               {(isAdminUser || privileges.sales?.update) && (
                 <div className="bg-slate-950 p-3 rounded border border-slate-800 space-y-2">
                   <p className="font-semibold text-emerald-400">Update Payment / Clear Balance:</p>
+                  <p className="text-[10px] text-slate-400">Any payment above the balance due will automatically be credited to the customer&apos;s account.</p>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="text-[10px] text-slate-400 block mb-1">Additional Paid Amount ({shopProfile.currency}):</label>
                       <input 
                         type="number" 
+                        step="any"
                         id="update-additional-paid"
                         placeholder="0"
                         className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-white"
@@ -12212,6 +13314,9 @@ export default function App() {
                         if (box) box.style.display = String(e.target.value || '').toLowerCase().includes('m-pesa') ? 'block' : 'none';
                       }}>
                         {(paymentMethods || [{ name: 'Cash' }, { name: 'M-Pesa' }]).map(pm => <option key={pm.id || pm.name} value={pm.name}>{pm.name}</option>)}
+                        {payCustCredit > 0 && (
+                          <option value="Account Credit">Account Credit ({shopProfile.currency} {payCustCredit.toLocaleString()})</option>
+                        )}
                       </SearchableSelect>
                     </div>
                   </div>
@@ -12225,17 +13330,43 @@ export default function App() {
                       const method = document.getElementById('update-pay-method').value;
                       const totalAmt = parseFloat(selectedSaleItem.totalAmount) || 0;
                       const prevPaid = parseFloat(selectedSaleItem.paidAmount) || 0;
-                      const currentDue = Math.max(0, (parseFloat(selectedSaleItem.balanceDue) || Math.max(0, totalAmt - prevPaid)));
-                      let addAmount = parseFloat(addInput) || 0;
+                      const currentDue = Math.max(0, (parseFloat(selectedSaleItem.balanceDue) ?? Math.max(0, totalAmt - prevPaid)));
+                      const addAmount = parseFloat(addInput) || 0;
                       if (addAmount <= 0) {
                         alert('Enter a payment amount greater than 0.');
                         return;
                       }
-                      if (addAmount > currentDue) addAmount = currentDue;
+                      const isAccountCreditMethod = String(method || '').toLowerCase().includes('account credit');
+                      if (isAccountCreditMethod) {
+                        if (!payCust || payCustCredit <= 0) {
+                          alert('Customer has no available account credit.');
+                          return;
+                        }
+                        if (addAmount > payCustCredit + 0.009) {
+                          alert(`Amount exceeds available customer account credit (${shopProfile.currency} ${payCustCredit.toLocaleString()}).`);
+                          return;
+                        }
+                        if (addAmount > currentDue + 0.009) {
+                          alert(`Account credit payment cannot exceed current balance due (${shopProfile.currency} ${currentDue.toLocaleString()}).`);
+                          return;
+                        }
+                      }
 
-                      const newPaidAmt = prevPaid + addAmount;
-                      const newBalance = Math.max(0, totalAmt - newPaidAmt);
-                      const newType = newBalance === 0 ? 'Paid' : (selectedSaleItem.saleType || selectedSaleItem.type || 'Credit');
+                      const appliedToDebt = Math.min(addAmount, currentDue);
+                      const excessToAccount = isAccountCreditMethod ? 0 : Math.max(0, Math.round((addAmount - currentDue) * 100) / 100);
+                      const acctCreditUsed = isAccountCreditMethod ? appliedToDebt : 0;
+
+                      if (excessToAccount > 0.009) {
+                        const ok = window.confirm(
+                          `Payment (${shopProfile.currency} ${addAmount.toLocaleString()}) exceeds balance due (${shopProfile.currency} ${currentDue.toLocaleString()}).\n` +
+                          `Apply ${shopProfile.currency} ${appliedToDebt.toLocaleString()} to clear this debt and credit the excess ${shopProfile.currency} ${excessToAccount.toLocaleString()} into ${selectedSaleItem.customerName}'s account?`
+                        );
+                        if (!ok) return;
+                      }
+
+                      const newPaidAmt = prevPaid + appliedToDebt;
+                      const newBalance = Math.max(0, Math.round((totalAmt - newPaidAmt) * 100) / 100);
+                      const newType = newBalance <= 0.009 ? 'Paid' : (selectedSaleItem.saleType || selectedSaleItem.type || 'Credit');
                       const itemsArr = parseSaleItems(selectedSaleItem);
                       const itemsJson = JSON.stringify(itemsArr);
 
@@ -12257,7 +13388,9 @@ export default function App() {
                       const nextPaymentLine = {
                         id: `spay-${Date.now()}`,
                         date: new Date().toISOString(),
-                        amount: addAmount,
+                        amount: appliedToDebt,
+                        tenderedAmount: addAmount,
+                        excessCredited: excessToAccount,
                         paymentMethod: method,
                         mpesaCode: (method && String(method).toLowerCase().includes('m-pesa')) ? mpesaTxn : ''
                       };
@@ -12273,6 +13406,10 @@ export default function App() {
                           : method,
                         paymentHistory: nextHistory,
                         items: itemsJson,
+                        customerId: payCust?.id || selectedSaleItem.customerId || '',
+                        lastPaymentMethod: method,
+                        accountCreditUsed: acctCreditUsed,
+                        excessCredit: excessToAccount,
                         mpesaCode: (method && String(method).toLowerCase().includes('m-pesa'))
                           ? (mpesaTxn || selectedSaleItem.mpesaCode || '')
                           : (selectedSaleItem.mpesaCode || 'N/A')
@@ -12287,11 +13424,18 @@ export default function App() {
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify(updatedSale)
                         });
+                        const d = await res.json().catch(() => ({}));
                         if (!res.ok) {
                           setSales(sales.map(s => s.id === selectedSaleItem.id ? selectedSaleItem : s));
-                          alert('Failed to update sale record in database.');
+                          alert(d.error || 'Failed to update sale record in database.');
                         } else {
-                          logAudit('payment', 'sales', `${updatedSale.id} · ${shopProfile.currency} ${addAmount} via ${method}`);
+                          if (payCust && (excessToAccount > 0 || acctCreditUsed > 0 || d.customerCredit)) {
+                            const nextCred = d.customerCredit?.creditBalance !== undefined
+                              ? Number(d.customerCredit.creditBalance)
+                              : Math.max(0, Math.round((payCustCredit - acctCreditUsed + excessToAccount) * 100) / 100);
+                            setCustomers(prev => prev.map(c => c.id === payCust.id ? { ...c, creditBalance: nextCred } : c));
+                          }
+                          logAudit('payment', 'sales', `${updatedSale.id} · ${shopProfile.currency} ${appliedToDebt} via ${method}${excessToAccount > 0 ? ` (+${shopProfile.currency} ${excessToAccount} account credit)` : ''}`);
                         }
                       } catch (err) {
                         console.error(err);
@@ -12300,7 +13444,7 @@ export default function App() {
                     }}
                     className="w-full mt-2 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded"
                   >
-                    Apply Payment & Update Status
+                    Apply Payment &amp; Update Status
                   </button>
                 </div>
               )}
@@ -12323,6 +13467,8 @@ export default function App() {
                 )}
               </div>
             </div>
+              );
+            })()}
             </div>
           </div>
         </div>
@@ -12654,11 +13800,20 @@ export default function App() {
               <div><label className="text-slate-400 block mb-1">Bank Account</label><input type="text" value={employeeForm.bankAccount} onChange={e => setEmployeeForm({...employeeForm, bankAccount: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /></div>
               <div><label className="text-slate-400 block mb-1">Bank Name</label><input type="text" value={employeeForm.bankName || ''} onChange={e => setEmployeeForm({...employeeForm, bankName: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" placeholder="e.g. Equity, KCB, Co-op" /></div>
               <div><label className="text-slate-400 block mb-1">Leave Balance (days)</label><input type="number" value={employeeForm.leaveBalance} onChange={e => setEmployeeForm({...employeeForm, leaveBalance: parseFloat(e.target.value) || 0})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /></div>
+              {(accessibleBranches || branches || []).length > 0 && (
+                <div className="sm:col-span-2">
+                  <label className="text-slate-400 block mb-1">Branch / Location</label>
+                  <SearchableSelect value={employeeForm.branchId || strictActiveBranchId || activeBranchId || ''} onChange={e => setEmployeeForm({...employeeForm, branchId: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
+                    <option value="">— Unassigned —</option>
+                    {(accessibleBranches || branches || []).map(b => <option key={b.id} value={b.id}>{b.name || b.id}</option>)}
+                  </SearchableSelect>
+                </div>
+              )}
               <div className="sm:col-span-2">
                 <label className="text-slate-400 block mb-1">Reports To (Manager)</label>
                 <SearchableSelect value={employeeForm.managerId || ''} onChange={e => setEmployeeForm({...employeeForm, managerId: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
                   <option value="">— No manager (top level) —</option>
-                  {employees.filter(e => e.id !== selectedEmployee?.id && e.id !== employeeForm.id).map(e => (
+                  {(strictBranchEmployees || []).filter(e => e.id !== selectedEmployee?.id && e.id !== employeeForm.id).map(e => (
                     <option key={e.id} value={e.id}>{e.name} ({e.position || e.department || 'Staff'})</option>
                   ))}
                 </SearchableSelect>
@@ -12698,6 +13853,7 @@ export default function App() {
                 bankAccount: employeeForm.bankAccount || '',
                 bankName: employeeForm.bankName || '',
                 leaveBalance: parseFloat(employeeForm.leaveBalance) ?? 21,
+                branchId: employeeForm.branchId || strictActiveBranchId || activeBranchId || '',
                 managerId: employeeForm.managerId || '',
                 userId: employeeForm.userId || '',
                 createdBy: selectedEmployee?.createdBy || currentUser?.name || currentUser?.id || ''
@@ -12722,7 +13878,7 @@ export default function App() {
                 {(isAdminUser || canUpdate('hr') || canUpdate('employees')) ? (
                   <SearchableSelect value={leaveForm.employeeId} onChange={e => setLeaveForm({...leaveForm, employeeId: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
                     <option value="">Select employee</option>
-                    {employees.filter(e => e.status === 'Active').map(e => <option key={e.id} value={e.id}>{e.name} (Bal: {e.leaveBalance ?? 21}d)</option>)}
+                    {(strictBranchEmployees || []).filter(e => e.status === 'Active').map(e => <option key={e.id} value={e.id}>{e.name} (Bal: {e.leaveBalance ?? 21}d)</option>)}
                   </SearchableSelect>
                 ) : (
                   <div className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
@@ -12830,17 +13986,18 @@ export default function App() {
               <p className="text-[10px] text-slate-500">Select how many units of each item to return.</p>
             </div>
             <div className="space-y-2 max-h-48 overflow-y-auto">
-              {(purchaseReturnPO._returnLines || [{ itemId: purchaseReturnPO.itemId, itemName: purchaseReturnPO.itemName, quantity: purchaseReturnPO.quantity, cost: purchaseReturnPO.cost, returnedQty: purchaseReturnPO.returnedQty || 0 }]).map((ln, idx) => {
-                const max = Math.max(0, (Number(ln.quantity) || 0) - (Number(ln.returnedQty) || 0));
+              {(purchaseReturnPO._returnLines || [{ itemId: purchaseReturnPO.itemId, itemName: purchaseReturnPO.itemName, quantity: purchaseReturnPO.quantity, cost: purchaseReturnPO.cost, returnedQty: purchaseReturnPO.returnedQty || 0, receivedQty: purchaseReturnPO.receivedQty || 0 }]).map((ln, idx) => {
+                const recCap = (Number(ln.receivedQty) || 0) > 0 ? Number(ln.receivedQty) : (purchaseReturnPO.received ? (Number(ln.quantity) || 0) : (Number(purchaseReturnPO.receivedQty) || 0));
+                const max = Math.max(0, recCap - (Number(ln.returnedQty) || 0));
                 return (
                   <div key={idx} className="bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs">
                     <div className="flex justify-between gap-2">
                       <span className="text-white font-semibold">{ln.itemName || ln.itemId || 'Item'}</span>
                       <span className="text-slate-400">{shopProfile.currency} {(Number(ln.cost) || 0).toLocaleString()}/unit</span>
                     </div>
-                    <p className="text-[10px] text-slate-500 mt-0.5">Ordered: {ln.quantity} · Returned: {ln.returnedQty || 0} · Max now: {max}</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Ordered: {ln.quantity} · Received: {recCap} · Returned: {ln.returnedQty || 0} · Max now: {max}</p>
                     <input type="number" min="0" max={max} value={purchaseReturnLineQtys[idx] ?? 0}
-                      onChange={e => setPurchaseReturnLineQtys({ ...purchaseReturnLineQtys, [idx]: e.target.value })}
+                      onChange={e => setPurchaseReturnLineQtys({ ...purchaseReturnLineQtys, [idx]: Math.min(max, Math.max(0, parseInt(e.target.value, 10) || 0)) })}
                       className="mt-1 w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-white text-xs"
                       disabled={max <= 0} />
                   </div>
@@ -12879,7 +14036,7 @@ export default function App() {
               <div>
                 <label className="text-slate-400 block mb-1">Employee</label>
                 <SearchableSelect value={selectedLeave.employeeId} onChange={e => setSelectedLeave({...selectedLeave, employeeId: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
-                  {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                  {(strictBranchEmployees || []).map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
                 </SearchableSelect>
               </div>
               <div>
@@ -13127,7 +14284,7 @@ export default function App() {
                 <label className="text-slate-400 block mb-1">Employee *</label>
                 <SearchableSelect value={payrollForm.employeeId} onChange={e => setPayrollForm({...payrollForm, employeeId: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
                   <option value="">Select employee</option>
-                  {employees.filter(e => e.status === 'Active').map(e => <option key={e.id} value={e.id}>{e.name} — {shopProfile.currency} {(parseFloat(e.salary)||0).toLocaleString()}</option>)}
+                  {(strictBranchEmployees || []).filter(e => e.status === 'Active').map(e => <option key={e.id} value={e.id}>{e.name} — {shopProfile.currency} {(parseFloat(e.salary)||0).toLocaleString()}</option>)}
                 </SearchableSelect>
               </div>
               <div>
@@ -13172,6 +14329,375 @@ export default function App() {
                 <input type="text" value={payrollForm.notes || ''} onChange={e => setPayrollForm({...payrollForm, notes: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" />
               </div>
               <button onClick={handleGeneratePayroll} className="w-full py-2 bg-emerald-500 text-slate-950 font-bold rounded">Create Payroll Record</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Partial PO Receive Modal */}
+      {poReceiveModalOpen && poReceivePO && (
+        <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-50 p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-lg space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
+            <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+              <h4 className="font-bold text-white text-sm">Receive Purchase Order — {poReceivePO.id}</h4>
+              <button type="button" onClick={() => { if (!poReceiveBusy) { setPoReceiveModalOpen(false); setPoReceivePO(null); } }} className="text-slate-400">✕</button>
+            </div>
+            <div className="text-xs bg-slate-950 border border-slate-800 rounded p-3 space-y-1">
+              <p><span className="text-slate-400">Supplier:</span> <span className="text-white font-semibold">{poReceivePO.supplierName || '—'}</span></p>
+              <p className="text-[11px] text-slate-400">Enter quantity received now per line item. Partial receives update stock and move the order to Partially Received until all units arrive.</p>
+            </div>
+            <div className="space-y-2 max-h-60 overflow-y-auto">
+              {(poReceivePO._receiveLines || []).map((ln, idx) => {
+                const ordered = Number(ln.quantity) || 0;
+                const returned = Number(ln.returnedQty) || 0;
+                const alreadyRec = Number(ln.receivedQty) || 0;
+                const remaining = Math.max(0, ordered - returned - alreadyRec);
+                return (
+                  <div key={idx} className="bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs space-y-1">
+                    <div className="flex justify-between gap-2">
+                      <span className="font-semibold text-white">{ln.itemName || ln.itemId || 'Item'}</span>
+                      <span className="text-slate-400">{shopProfile.currency} {(Number(ln.cost) || 0).toLocaleString()}/unit</span>
+                    </div>
+                    <p className="text-[10px] text-slate-500">Ordered: {ordered} · Already Received: {alreadyRec}{returned ? ` · Returned: ${returned}` : ''} · Remaining: {remaining}</p>
+                    <input
+                      type="number"
+                      min="0"
+                      max={remaining}
+                      disabled={remaining <= 0 || poReceiveBusy}
+                      value={poReceiveLineQtys[idx] ?? 0}
+                      onChange={e => {
+                        const val = Math.min(remaining, Math.max(0, parseInt(e.target.value, 10) || 0));
+                        setPoReceiveLineQtys({ ...poReceiveLineQtys, [idx]: val });
+                      }}
+                      className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-white text-xs"
+                    />
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                disabled={poReceiveBusy}
+                onClick={() => {
+                  const next = {};
+                  (poReceivePO._receiveLines || []).forEach((ln, idx) => {
+                    next[idx] = Math.max(0, (Number(ln.quantity) || 0) - (Number(ln.returnedQty) || 0) - (Number(ln.receivedQty) || 0));
+                  });
+                  setPoReceiveLineQtys(next);
+                }}
+                className="px-3 py-2 bg-slate-800 text-slate-200 font-semibold rounded text-xs"
+              >
+                Fill Remaining
+              </button>
+              <button
+                type="button"
+                disabled={poReceiveBusy || sessionExpiredModalOpen}
+                onClick={async () => {
+                  if (poReceiveBusy) return;
+                  if (sessionExpiredModalOpen) { alert('Session expired — sign in again to continue.'); return; }
+                  const lines = poReceivePO._receiveLines || [];
+                  const receiveLines = [];
+                  for (let idx = 0; idx < lines.length; idx++) {
+                    const ln = lines[idx];
+                    const remaining = Math.max(0, (Number(ln.quantity) || 0) - (Number(ln.returnedQty) || 0) - (Number(ln.receivedQty) || 0));
+                    const qty = Math.min(remaining, Math.max(0, parseInt(poReceiveLineQtys[idx], 10) || 0));
+                    if (qty > 0) {
+                      receiveLines.push({ index: idx, itemId: ln.itemId, itemName: ln.itemName, qty });
+                    }
+                  }
+                  if (!receiveLines.length) {
+                    alert('Enter a receive quantity greater than 0 for at least one line.');
+                    return;
+                  }
+                  setPoReceiveBusy(true);
+                  try {
+                    const targetBranchId = poReceivePO.branchId || strictActiveBranchId || activeBranchId || '';
+                    const res = await apiFetch('/api/purchase-receive', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        poId: poReceivePO.id,
+                        branchId: targetBranchId || undefined,
+                        receiveLines
+                      })
+                    });
+                    if (res.status === 401) {
+                      setPoReceiveBusy(false);
+                      return;
+                    }
+                    const d = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                      alert(d.error || 'Failed to receive purchase order.');
+                      setPoReceiveBusy(false);
+                      return;
+                    }
+                    await refreshAllDataFromServer();
+                    receiveLines.forEach(ln => {
+                      logStock(ln.itemId, ln.itemName, ln.qty, 'PO Receive', poReceivePO.id, targetBranchId);
+                    });
+                    const totalRecNow = receiveLines.reduce((s, x) => s + x.qty, 0);
+                    logAudit('po_receive', 'Purchase Order', `PO ${poReceivePO.id} received ${totalRecNow} unit(s) (${d.workflowStatus || ''})`, targetBranchId);
+                    setPoReceiveModalOpen(false);
+                    setPoReceivePO(null);
+                  } catch (e) {
+                    alert('Network error while receiving purchase order.');
+                  } finally {
+                    setPoReceiveBusy(false);
+                  }
+                }}
+                className="flex-1 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 text-slate-950 font-bold rounded text-xs"
+              >
+                {poReceiveBusy ? 'Receiving…' : 'Confirm Receive'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Legacy Shared Items Assign / Duplicate Modal */}
+      {legacyAssignModalOpen && (() => {
+        const legacyUnassignedList = (branches || []).length > 0
+          ? (inventory || []).filter(i => i.isLegacyUnassigned || (!i.branchId && !i.rawAllLocations && !i.allLocations && parseAllowedBranches(i).length === 0))
+          : [];
+        const branchList = accessibleBranches && accessibleBranches.length ? accessibleBranches : (branches || []);
+        const selectedCount = legacyUnassignedList.filter(it => legacyAssignSelectedIds[it.id]).length;
+        return (
+          <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-[80] p-3 sm:p-4 overflow-y-auto">
+            <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-xl space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
+              <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+                <h4 className="font-bold text-white text-sm">Assign / Split Legacy Inventory Items</h4>
+                <button type="button" onClick={() => { if (!legacyAssignBusy) setLegacyAssignModalOpen(false); }} className="text-slate-400">✕</button>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setLegacyAssignMode('assign')}
+                  className={`flex-1 py-2 rounded-lg text-xs font-bold border ${legacyAssignMode === 'assign' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-950 text-slate-300 border-slate-700'}`}
+                >
+                  Assign to Single Location
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLegacyAssignMode('duplicate')}
+                  className={`flex-1 py-2 rounded-lg text-xs font-bold border ${legacyAssignMode === 'duplicate' ? 'bg-sky-500 text-slate-950 border-sky-400' : 'bg-slate-950 text-slate-300 border-slate-700'}`}
+                >
+                  Duplicate Across Branches
+                </button>
+              </div>
+
+              {legacyAssignMode === 'assign' ? (
+                <div className="text-xs space-y-1">
+                  <label className="text-slate-400 block">Destination Location *</label>
+                  <SearchableSelect value={legacyAssignBranchId} onChange={e => setLegacyAssignBranchId(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white">
+                    <option value="">-- Select Location --</option>
+                    {branchList.map(b => <option key={b.id} value={b.id}>{b.name || b.id}</option>)}
+                  </SearchableSelect>
+                  <p className="text-[10px] text-slate-500">Moves selected legacy items into this single location preserving their current quantity.</p>
+                </div>
+              ) : (
+                <div className="text-xs space-y-2">
+                  <p className="text-[11px] text-slate-400">Set initial stock quantity for each branch you want a separate item row created in (leave blank to skip a branch; set 0 or positive integer to create):</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-40 overflow-y-auto">
+                    {branchList.map(b => (
+                      <div key={b.id} className="flex items-center justify-between gap-2 bg-slate-950 border border-slate-800 rounded p-2">
+                        <span className="text-white truncate">{b.name || b.id}</span>
+                        <input
+                          type="number"
+                          min="0"
+                          placeholder="Qty"
+                          value={legacyAssignBranchQtys[b.id] ?? ''}
+                          onChange={e => setLegacyAssignBranchQtys({ ...legacyAssignBranchQtys, [b.id]: e.target.value })}
+                          className="w-20 bg-slate-900 border border-slate-700 rounded p-1 text-white text-right"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-slate-300 font-semibold">Legacy Items ({selectedCount} / {legacyUnassignedList.length} selected)</span>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => { const m = {}; legacyUnassignedList.forEach(it => { m[it.id] = true; }); setLegacyAssignSelectedIds(m); }} className="text-[10px] text-sky-400 font-bold">Select All</button>
+                    <button type="button" onClick={() => setLegacyAssignSelectedIds({})} className="text-[10px] text-slate-400">Clear</button>
+                  </div>
+                </div>
+                <div className="max-h-48 overflow-y-auto space-y-1 bg-slate-950 border border-slate-800 rounded p-2 text-xs">
+                  {legacyUnassignedList.length === 0 ? (
+                    <p className="text-slate-500 text-center py-3">All items already have branch assignments.</p>
+                  ) : legacyUnassignedList.map(it => (
+                    <label key={it.id} className="flex items-center justify-between gap-2 px-2 py-1 hover:bg-slate-900 rounded cursor-pointer">
+                      <span className="flex items-center gap-2 text-white">
+                        <input
+                          type="checkbox"
+                          checked={!!legacyAssignSelectedIds[it.id]}
+                          onChange={e => setLegacyAssignSelectedIds({ ...legacyAssignSelectedIds, [it.id]: e.target.checked })}
+                        />
+                        {it.name}
+                      </span>
+                      <span className="text-slate-400 font-mono text-[11px]">Qty: {it.quantity ?? 0}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={legacyAssignBusy || selectedCount === 0 || sessionExpiredModalOpen}
+                onClick={async () => {
+                  if (legacyAssignBusy) return;
+                  const itemIds = legacyUnassignedList.filter(it => legacyAssignSelectedIds[it.id]).map(it => it.id);
+                  if (!itemIds.length) { alert('Select at least one item.'); return; }
+                  const payload = { mode: legacyAssignMode };
+                  if (legacyAssignMode === 'assign') {
+                    if (!legacyAssignBranchId) { alert('Choose a destination location.'); return; }
+                    payload.itemIds = itemIds;
+                    payload.branchId = legacyAssignBranchId;
+                  } else {
+                    const allocations = Object.entries(legacyAssignBranchQtys || {})
+                      .filter(([, qv]) => qv !== '' && qv != null)
+                      .map(([bid, qv]) => ({ branchId: bid, qty: Math.max(0, parseInt(qv, 10) || 0) }));
+                    if (!allocations.length) {
+                      alert('Enter a quantity (0 or greater) for at least one branch.');
+                      return;
+                    }
+                    payload.items = itemIds.map(id => ({ id, allocations }));
+                  }
+                  setLegacyAssignBusy(true);
+                  try {
+                    const res = await apiFetch('/api/inventory-assign-legacy', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(payload)
+                    });
+                    if (res.status === 401) { setLegacyAssignBusy(false); return; }
+                    const d = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                      alert(d.error || 'Legacy assignment failed.');
+                      setLegacyAssignBusy(false);
+                      return;
+                    }
+                    await refreshAllDataFromServer();
+                    logAudit('inventory_assign_legacy', 'Inventory', `${legacyAssignMode}: ${itemIds.length} item(s)`, legacyAssignBranchId || strictActiveBranchId || '');
+                    setLegacyAssignModalOpen(false);
+                    alert(`Updated ${d.updatedCount ?? itemIds.length} legacy item(s)${d.createdCount ? `, created ${d.createdCount} branch row(s)` : ''}.`);
+                  } catch (e) {
+                    alert('Network error assigning legacy items.');
+                  } finally {
+                    setLegacyAssignBusy(false);
+                  }
+                }}
+                className="w-full py-2.5 bg-amber-500 hover:bg-amber-400 disabled:bg-slate-700 text-slate-950 font-bold rounded-lg text-xs"
+              >
+                {legacyAssignBusy ? 'Applying…' : (legacyAssignMode === 'assign' ? 'Assign Selected Items to Branch' : 'Duplicate Selected Items to Branches')}
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Blocking Session Expired Re-Auth Modal */}
+      {sessionExpiredModalOpen && (
+        <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-sm flex items-center justify-center z-[120] p-4">
+          <div className="bg-slate-900 border border-rose-500/60 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
+            <div className="space-y-1 border-b border-slate-800 pb-3">
+              <h4 className="font-bold text-rose-400 text-base">Session expired — sign in again</h4>
+              <p className="text-xs text-slate-300">Your authentication token expired or is no longer valid. Sign back in below to resume with your unsaved cart and forms intact.</p>
+            </div>
+            {sessionReauthError && (
+              <div className="bg-rose-500/10 border border-rose-500/40 rounded-lg px-3 py-2 text-xs text-rose-300">
+                {sessionReauthError}
+              </div>
+            )}
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="text-slate-400 block mb-1">Username</label>
+                <input
+                  type="text"
+                  value={sessionReauthUser}
+                  onChange={e => setSessionReauthUser(e.target.value)}
+                  disabled={sessionReauthBusy}
+                  placeholder="Enter username"
+                  className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">PIN / Password</label>
+                <input
+                  type="password"
+                  value={sessionReauthPin}
+                  onChange={e => setSessionReauthPin(e.target.value)}
+                  disabled={sessionReauthBusy}
+                  placeholder="Enter PIN or password"
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !sessionReauthBusy) {
+                      document.getElementById('session-reauth-submit-btn')?.click();
+                    }
+                  }}
+                  className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white"
+                />
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button
+                  id="session-reauth-submit-btn"
+                  type="button"
+                  disabled={sessionReauthBusy || !sessionReauthUser.trim() || !sessionReauthPin}
+                  onClick={async () => {
+                    if (sessionReauthBusy) return;
+                    setSessionReauthBusy(true);
+                    setSessionReauthError('');
+                    try {
+                      const endpoint = tenantInfo?.isSuperAdmin ? '/api/super-login' : '/api/login';
+                      const res = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username: sessionReauthUser.trim(), pin: sessionReauthPin })
+                      });
+                      const data = await res.json().catch(() => ({}));
+                      if (!res.ok || !data.token) {
+                        setSessionReauthError(data.error || 'Sign in failed. Please check your credentials.');
+                        setSessionReauthBusy(false);
+                        return;
+                      }
+                      setAuthToken(data.token);
+                      try {
+                        localStorage.setItem('erp_auth_token', data.token);
+                        localStorage.setItem('erp_login_time', Date.now().toString());
+                      } catch (_) {}
+                      if (data.privileges && typeof data.privileges === 'object') {
+                        setLoginPrivileges(data.privileges);
+                        try { localStorage.setItem('erp_login_privileges', JSON.stringify(data.privileges)); } catch (_) {}
+                      }
+                      if (data.user) {
+                        setCurrentUser(data.user);
+                      }
+                      setSessionReauthPin('');
+                      setSessionReauthError('');
+                      setSessionExpiredModalOpen(false);
+                    } catch (e) {
+                      setSessionReauthError('Network error while signing in. Please try again.');
+                    } finally {
+                      setSessionReauthBusy(false);
+                    }
+                  }}
+                  className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 text-slate-950 font-bold rounded-lg"
+                >
+                  {sessionReauthBusy ? 'Signing in…' : 'Sign In & Resume'}
+                </button>
+                <button
+                  type="button"
+                  disabled={sessionReauthBusy}
+                  onClick={() => {
+                    setSessionExpiredModalOpen(false);
+                    handleLogout();
+                  }}
+                  className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-lg"
+                >
+                  Logout instead
+                </button>
+              </div>
             </div>
           </div>
         </div>

@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS inventory (
   colour TEXT,
   wholesalePrice REAL,
   varianceValues TEXT,
+  locationQuantities TEXT,
+  allLocations INTEGER DEFAULT 0,
+  allowedBranches TEXT,
   branchId TEXT,
   tenantId TEXT
 );
@@ -39,6 +42,7 @@ CREATE TABLE IF NOT EXISTS customers (
   eligibility TEXT,
   loyaltyPoints REAL DEFAULT 0,
   creditLimit REAL DEFAULT 0,
+  creditBalance REAL DEFAULT 0,
   salesTermId TEXT,
   paymentTerm TEXT,
   tags TEXT,
@@ -69,6 +73,7 @@ CREATE TABLE IF NOT EXISTS sales (
   returnHistory TEXT,
   paymentHistory TEXT,
   originalSaleType TEXT,
+  idempotencyKey TEXT,
   branchId TEXT,
   tenantId TEXT
 );
@@ -168,6 +173,8 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
   taxInclusive INTEGER DEFAULT 0,
   paymentHistory TEXT,
   received INTEGER DEFAULT 0,
+  receivedQty INTEGER DEFAULT 0,
+  receiveHistory TEXT,
   createdBy TEXT,
   cogsBooked REAL DEFAULT 0,
   items TEXT,
