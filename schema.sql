@@ -198,6 +198,7 @@ CREATE TABLE IF NOT EXISTS tenant_settings (
   poApprovalLimit REAL DEFAULT 0,
   returnRequests TEXT,
   creditPolicy TEXT DEFAULT 'warn',
+  wizardCompleted INTEGER DEFAULT 1,
   updatedAt INTEGER
 );
 

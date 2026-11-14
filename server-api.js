@@ -14,21 +14,22 @@ export async function onRequest(context) {
       .split(',')
       .map(s => s.trim())
       .filter(Boolean);
-    // Always allow same-origin / no Origin (non-browser) and optional localhost for dev
     const defaultDev = ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:4173', 'http://127.0.0.1:4173'];
-    const originAllowed = true;
-    const allowOrigin = reqOrigin || allowedOrigins[0] || '*';
+    const isLocalHost = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const originAllowed = !reqOrigin || reqOrigin === url.origin || allowedOrigins.includes(reqOrigin) || (isLocalHost && defaultDev.includes(reqOrigin));
     const securityHeaders = {
       'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': allowOrigin,
       'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Branch-Id',
       'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
-      'Access-Control-Allow-Credentials': 'true',
       'Vary': 'Origin',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'strict-origin-when-cross-origin',
       'Cache-Control': 'no-store'
     };
+    if (reqOrigin && originAllowed) {
+      securityHeaders['Access-Control-Allow-Origin'] = reqOrigin;
+      securityHeaders['Access-Control-Allow-Credentials'] = 'true';
+    }
     const json = (data, status = 200) => new Response(JSON.stringify(data), {
       status,
       headers: securityHeaders
@@ -36,9 +37,12 @@ export async function onRequest(context) {
 
     if (request.method === 'OPTIONS') {
       if (reqOrigin && !originAllowed) {
-        return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+        return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers: { 'Content-Type': 'application/json', 'Vary': 'Origin' } });
       }
       return json({ ok: true });
+    }
+    if (reqOrigin && !originAllowed) {
+      return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers: { 'Content-Type': 'application/json', 'Vary': 'Origin' } });
     }
 
     // --- Auth helpers: PBKDF2 PIN hash, sessions, rate limit, privileges ---
@@ -263,13 +267,7 @@ export async function onRequest(context) {
             ).bind(tid, 'NEO Fashion Boutique', 'Premium Apparel & Footwear', 'KSh', '+254 700 000000', 'Kimathi Street, Nairobi', tid).run();
           } catch (_) {}
 
-          // Seed default users (plain PINs automatically hash with PBKDF2 on first login)
-          const insUser = env.DB.prepare(`INSERT OR IGNORE INTO users (id, name, role, pin, phone, status, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?)`);
-          await insUser.bind('u1', 'Main Admin', 'Admin', '1234', '+254 700 000000', 'Active', tid).run();
-          await insUser.bind('u2', 'Alice Wambui', 'Salesperson', '5678', '+254 711 222333', 'Active', tid).run();
-          await insUser.bind('u3', 'Benta Akinyi', 'Manager', '0000', '+254 733 999888', 'Active', tid).run();
-
-          // Seed default roles
+          // Seed default roles only (users must be created via signup or platform provisioning)
           const adminPriv = JSON.stringify({
             dashboard: { view: true, create: true, update: true, delete: true, ownOnly: false },
             pos: { view: true, create: true, update: true, delete: true, ownOnly: false },
@@ -517,8 +515,40 @@ globalThis.__neoSchemaReady = true;
 
     const clientIp = () => request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'unknown';
 
-    const checkRateLimit = async (_username) => {
-      // Login lockout disabled per user request
+    const checkRateLimit = async (username) => {
+      await ensureAuthTables();
+      const key = String(username || '').trim().toLowerCase();
+      const ip = clientIp();
+      const cutoff = Date.now() - LOGIN_WINDOW_MS;
+      const maxFails = (key.startsWith('signup:') || key.startsWith('change-pin:')) ? SENSITIVE_MAX_FAILS : LOGIN_MAX_FAILS;
+      try {
+        if (key) {
+          const rows = (await env.DB.prepare(
+            `SELECT ok, at FROM login_attempts WHERE LOWER(username) = ? AND at >= ? ORDER BY at DESC LIMIT 30`
+          ).bind(key, cutoff).all()).results || [];
+          let streakFails = 0;
+          let earliestFailAt = null;
+          for (const r of rows) {
+            if (Number(r.ok) === 1) break;
+            streakFails++;
+            earliestFailAt = Number(r.at) || earliestFailAt;
+          }
+          if (streakFails >= maxFails) {
+            const retryAfterMin = Math.max(1, Math.ceil(((earliestFailAt || Date.now()) + LOGIN_WINDOW_MS - Date.now()) / 60000));
+            return { blocked: true, retryAfterMin };
+          }
+        }
+        if (ip && ip !== 'unknown') {
+          const ipRow = await env.DB.prepare(
+            `SELECT COUNT(*) as c, MIN(at) as oldest FROM login_attempts WHERE ip = ? AND ok = 0 AND at >= ?`
+          ).bind(ip, cutoff).first();
+          const ipFails = Number(ipRow?.c) || 0;
+          if (ipFails >= 20) {
+            const retryAfterMin = Math.max(1, Math.ceil(((Number(ipRow?.oldest) || Date.now()) + LOGIN_WINDOW_MS - Date.now()) / 60000));
+            return { blocked: true, retryAfterMin };
+          }
+        }
+      } catch (_) {}
       return { blocked: false };
     };
     const writeSecurityAudit = async (authUser, action, entity, detail) => {
@@ -576,7 +606,7 @@ globalThis.__neoSchemaReady = true;
       if (row.userId === 'super-platform' || row.tenantId === 'platform') {
         let profileUser = null;
         try { profileUser = await env.DB.prepare('SELECT * FROM platform_profile WHERE id = 1').first(); } catch (_) {}
-        const display = (profileUser && profileUser.displayName) || (profileUser && profileUser.username) || env.SUPER_ADMIN_NAME || 'platform';
+        const display = (profileUser && profileUser.displayName) || (profileUser && profileUser.username) || env.SUPER_ADMIN_NAME || 'SuperAdmin';
         const user = {
           id: 'super-platform',
           name: display,
@@ -1181,10 +1211,10 @@ globalThis.__neoSchemaReady = true;
         await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tenant_settings (
           id TEXT PRIMARY KEY, tenantId TEXT UNIQUE, paymentMethods TEXT, salesTerms TEXT,
           loyalty TEXT, etims TEXT, salesTargets TEXT, tasks TEXT, cashups TEXT, auditLog TEXT,
-          itemVariances TEXT, poApprovalLimit REAL DEFAULT 0, returnRequests TEXT, creditPolicy TEXT DEFAULT 'warn', updatedAt INTEGER
+          itemVariances TEXT, poApprovalLimit REAL DEFAULT 0, returnRequests TEXT, creditPolicy TEXT DEFAULT 'warn', wizardCompleted INTEGER DEFAULT 1, updatedAt INTEGER
         )`).run();
       } catch (_) {}
-      for (const col of ['tasks TEXT', 'cashups TEXT', 'auditLog TEXT', 'itemVariances TEXT', 'poApprovalLimit REAL DEFAULT 0', 'returnRequests TEXT', 'creditPolicy TEXT DEFAULT \'warn\'']) {
+      for (const col of ['tasks TEXT', 'cashups TEXT', 'auditLog TEXT', 'itemVariances TEXT', 'poApprovalLimit REAL DEFAULT 0', 'returnRequests TEXT', 'creditPolicy TEXT DEFAULT \'warn\'', 'wizardCompleted INTEGER DEFAULT 1']) {
         try { await env.DB.prepare(`ALTER TABLE tenant_settings ADD COLUMN ${col}`).run(); } catch (_) {}
       }
     };
@@ -1357,6 +1387,16 @@ globalThis.__neoSchemaReady = true;
         loginShopProfile = await env.DB.prepare('SELECT * FROM shop_profile WHERE tenantId = ? OR id = ? LIMIT 1').bind(pTid, pTid).first();
         if (!loginShopProfile && pTid === 'tenant-default') loginShopProfile = await env.DB.prepare('SELECT * FROM shop_profile WHERE id = 1').first();
       } catch (_) {}
+      let needsBusinessWizard = false;
+      if ((user.role || '').toLowerCase() === 'admin') {
+        try {
+          await ensureTenantSettingsSchema();
+          const tsRow = await env.DB.prepare(`SELECT wizardCompleted FROM tenant_settings WHERE tenantId = ? LIMIT 1`).bind(userTenantId).first();
+          if (tsRow && tsRow.wizardCompleted !== null && tsRow.wizardCompleted !== undefined && Number(tsRow.wizardCompleted) === 0) {
+            needsBusinessWizard = true;
+          }
+        } catch (_) {}
+      }
       return json({
         token,
         expiresAt,
@@ -1372,7 +1412,8 @@ globalThis.__neoSchemaReady = true;
         },
         privileges: parsePrivileges(roleRow?.privileges),
         tenant: tenant ? { id: tenant.id, name: tenant.name, plan: tenant.plan, status: tenant.status, maxUsers: tenant.maxUsers, maxBranches: tenant.maxBranches } : null,
-        shopProfile: loginShopProfile || null
+        shopProfile: loginShopProfile || null,
+        needsBusinessWizard
       });
     }
 
@@ -1477,6 +1518,12 @@ globalThis.__neoSchemaReady = true;
             `INSERT INTO branches (id, tenantId, name, address, phone, status, isDefault, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
           ).bind(branchId, tenantId, locationName, body.locationAddress || '', body.phone || '', 'Active', 1, Date.now()).run();
         } catch (_) {}
+        try {
+          await ensureTenantSettingsSchema();
+          await env.DB.prepare(
+            `INSERT OR IGNORE INTO tenant_settings (id, tenantId, wizardCompleted, updatedAt) VALUES (?, ?, 0, ?)`
+          ).bind(tenantId, tenantId, Date.now()).run();
+        } catch (_) {}
       } catch (e) {
         return json({ error: 'Signup failed: ' + (e.message || 'error') }, 500);
       }
@@ -1490,25 +1537,31 @@ globalThis.__neoSchemaReady = true;
       const body = await request.json();
       const name = String(body.username || '').trim();
       const pin = String(body.pin || '');
+      if (!name || !pin) return json({ error: 'Username and PIN required' }, 400);
+      const rlSuper = await checkRateLimit('super:' + name);
+      if (rlSuper.blocked) {
+        return json({ error: `Too many failed logins. Try again in ${rlSuper.retryAfterMin} minutes.` }, 429);
+      }
       const envPin = String(env.SUPER_ADMIN_PIN || '').trim();
       let profileUser = null;
       try {
         await ensureAuthTables();
         profileUser = await env.DB.prepare('SELECT * FROM platform_profile WHERE id = 1').first();
       } catch (_) {}
-      const envName = String((profileUser && profileUser.username) || env.SUPER_ADMIN_NAME || 'platform').trim();
+      const envName = String((profileUser && profileUser.username) || env.SUPER_ADMIN_NAME || '').trim();
       let ok = false;
       let user = null;
-      if (!envPin) {
-        // Still allow DB SuperAdmin users if any
+      if (!envPin || !envName) {
+        // Allow DB SuperAdmin users if any
         try {
           const users = (await env.DB.prepare('SELECT * FROM users').all()).results || [];
           user = users.find(u => (u.name || '').toLowerCase() === name.toLowerCase() && (u.role || '').toLowerCase() === 'superadmin') || null;
           if (user && await verifyPin(pin, user.pin) && user.status === 'Active') ok = true;
         } catch (_) {}
         if (!ok) {
+          await recordLoginAttempt('super:' + name, false);
           return json({
-            error: 'Platform login not configured. In Cloudflare Pages → Settings → Environment variables, set SUPER_ADMIN_NAME and SUPER_ADMIN_PIN (Production), then redeploy.'
+            error: 'Platform login is not configured. Set SUPER_ADMIN_NAME and SUPER_ADMIN_PIN in your server environment or sign in with a SuperAdmin account.'
           }, 401);
         }
       } else if (name.toLowerCase() === envName.toLowerCase() && pin === envPin) {
@@ -1521,7 +1574,11 @@ globalThis.__neoSchemaReady = true;
           if (user && await verifyPin(pin, user.pin) && user.status === 'Active') ok = true;
         } catch (_) {}
       }
-      if (!ok || !user) return json({ error: 'Invalid super-admin credentials. Use SUPER_ADMIN_NAME / SUPER_ADMIN_PIN from Cloudflare env, or a user with role SuperAdmin.' }, 401);
+      if (!ok || !user) {
+        await recordLoginAttempt('super:' + name, false);
+        return json({ error: 'Invalid super-admin credentials.' }, 401);
+      }
+      await recordLoginAttempt('super:' + name, true);
       const tokenBytes = randomBytes(32);
       const token = b64(tokenBytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
       const expiresAt = Date.now() + SESSION_MS;
@@ -1956,6 +2013,12 @@ globalThis.__neoSchemaReady = true;
             `INSERT INTO tenants (id, name, plan, status, maxUsers, maxBranches, createdAt, ownerEmail, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
           ).bind(tid, body.name || 'New Shop', plan, status, maxUsers ?? lim.maxUsers ?? 5, maxBranches ?? lim.maxBranches ?? 1, Date.now(), body.ownerEmail || '', body.notes || 'created-by-platform').run();
         }
+        try {
+          await ensureTenantSettingsSchema();
+          await env.DB.prepare(
+            `INSERT OR IGNORE INTO tenant_settings (id, tenantId, wizardCompleted, updatedAt) VALUES (?, ?, 0, ?)`
+          ).bind(tid, tid, Date.now()).run();
+        } catch (_) {}
         try { await writeSecurityAudit(auth, 'create', 'tenant', tid); } catch (_) {}
         return json({ success: true, id: tid, trialEndsAt });
       }
@@ -2190,8 +2253,8 @@ globalThis.__neoSchemaReady = true;
         let row = null;
         try { row = await env.DB.prepare('SELECT * FROM platform_profile WHERE id = 1').first(); } catch (_) {}
         return json({
-          profile: row || { username: env.SUPER_ADMIN_NAME || 'platform', displayName: auth.user?.name || 'Platform' },
-          note: 'Username used for Platform login is SUPER_ADMIN_NAME in Cloudflare env unless you rely on a SuperAdmin DB user. Display name is stored here.'
+          profile: row || { username: env.SUPER_ADMIN_NAME || '', displayName: auth.user?.name || 'Platform' },
+          note: 'Username used for Platform login is configured via SUPER_ADMIN_NAME environment variable unless you use a SuperAdmin database account. Display name is stored here.'
         });
       }
       if (request.method === 'PUT' || request.method === 'POST') {
@@ -2217,7 +2280,7 @@ globalThis.__neoSchemaReady = true;
         return json({
           success: true,
           profile: { username, displayName },
-          warning: 'Env SUPER_ADMIN_NAME still controls env-based Platform login until you change it in Cloudflare to match the new username.'
+          warning: 'Environment variable SUPER_ADMIN_NAME continues to govern env-based Platform login until updated on the server.'
         });
       }
     }
@@ -2453,6 +2516,7 @@ globalThis.__neoSchemaReady = true;
         branches: branchesList,
         stockMovements,
         tenantSettings,
+        needsBusinessWizard: !auth.isSuperAdmin && !!auth.isAdmin && !!tenantSettings && tenantSettings.wizardCompleted !== null && tenantSettings.wizardCompleted !== undefined && Number(tenantSettings.wizardCompleted) === 0,
         ...await (async () => {
           const ten = await getTenant(tidBranches);
           const planId = ten?.plan || 'starter';
@@ -5552,6 +5616,7 @@ globalThis.__neoSchemaReady = true;
         const previous = await runPnl(compareFrom || from, compareTo || to);
         return json({
           type,
+          branchId: branchId || null,
           current: { from: from || null, to: to || null, ...current },
           previous: { from: compareFrom || null, to: compareTo || null, ...previous },
           variance: {
@@ -5918,6 +5983,7 @@ globalThis.__neoSchemaReady = true;
         const poApprovalLimit = body.poApprovalLimit !== undefined && body.poApprovalLimit !== null ? Math.max(0, parseFloat(body.poApprovalLimit) || 0) : null;
         const returnRequests = body.returnRequests != null ? (typeof body.returnRequests === 'string' ? body.returnRequests : JSON.stringify(body.returnRequests)) : null;
         const creditPolicy = body.creditPolicy !== undefined ? (body.creditPolicy === 'stop' ? 'stop' : 'warn') : null;
+        const wizardCompleted = body.wizardCompleted !== undefined && body.wizardCompleted !== null ? (body.wizardCompleted ? 1 : 0) : null;
         const existing = await env.DB.prepare(`SELECT * FROM tenant_settings WHERE tenantId = ? LIMIT 1`).bind(tid).first();
         if (existing) {
           try {
@@ -5935,9 +6001,10 @@ globalThis.__neoSchemaReady = true;
                 poApprovalLimit = COALESCE(?, poApprovalLimit),
                 returnRequests = COALESCE(?, returnRequests),
                 creditPolicy = COALESCE(?, creditPolicy),
+                wizardCompleted = COALESCE(?, wizardCompleted),
                 updatedAt = ?
                WHERE tenantId = ?`
-            ).bind(pm, st, loy, et, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests, creditPolicy, Date.now(), tid).run();
+            ).bind(pm, st, loy, et, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests, creditPolicy, wizardCompleted, Date.now(), tid).run();
           } catch (_) {
             await env.DB.prepare(
               `UPDATE tenant_settings SET
@@ -5956,9 +6023,9 @@ globalThis.__neoSchemaReady = true;
         } else {
           try {
             await env.DB.prepare(
-              `INSERT INTO tenant_settings (id, tenantId, paymentMethods, salesTerms, loyalty, etims, salesTargets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests, creditPolicy, updatedAt)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            ).bind(tid, tid, pm, st, loy, et, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit ?? 0, returnRequests, creditPolicy || 'warn', Date.now()).run();
+              `INSERT INTO tenant_settings (id, tenantId, paymentMethods, salesTerms, loyalty, etims, salesTargets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests, creditPolicy, wizardCompleted, updatedAt)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(tid, tid, pm, st, loy, et, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit ?? 0, returnRequests, creditPolicy || 'warn', wizardCompleted ?? 1, Date.now()).run();
           } catch (_) {
             await env.DB.prepare(
               `INSERT INTO tenant_settings (id, tenantId, paymentMethods, salesTerms, loyalty, etims, salesTargets, tasks, cashups, auditLog, updatedAt)
@@ -5971,6 +6038,22 @@ globalThis.__neoSchemaReady = true;
         }
         return json({ success: true });
       }
+    }
+
+    if ((routeType === 'business-wizard-complete' || routeType === 'business_wizard_complete') && request.method === 'POST') {
+      if (!auth) return unauth();
+      if (auth.isSuperAdmin) return deny('Not applicable for super-admin');
+      if (!auth.isAdmin && !can(auth, 'settings', 'update')) return deny('Only business administrators can complete setup');
+      const tid = auth.tenantId || 'tenant-default';
+      await ensureTenantSettingsSchema();
+      const existing = await env.DB.prepare(`SELECT id FROM tenant_settings WHERE tenantId = ? LIMIT 1`).bind(tid).first();
+      if (existing) {
+        await env.DB.prepare(`UPDATE tenant_settings SET wizardCompleted = 1, updatedAt = ? WHERE tenantId = ?`).bind(Date.now(), tid).run();
+      } else {
+        await env.DB.prepare(`INSERT INTO tenant_settings (id, tenantId, wizardCompleted, updatedAt) VALUES (?, ?, 1, ?)`).bind(tid, tid, Date.now()).run();
+      }
+      try { await appendTenantAuditRecord(tid, auth.user?.name || 'Admin', 'update', 'business_wizard', 'Completed new business setup wizard'); } catch (_) {}
+      return json({ success: true, needsBusinessWizard: false });
     }
 
 

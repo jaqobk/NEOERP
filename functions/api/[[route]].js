@@ -14,21 +14,22 @@ export async function onRequest(context) {
       .split(',')
       .map(s => s.trim())
       .filter(Boolean);
-    // Always allow same-origin / no Origin (non-browser) and optional localhost for dev
     const defaultDev = ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:4173', 'http://127.0.0.1:4173'];
-    const originAllowed = true;
-    const allowOrigin = reqOrigin || allowedOrigins[0] || '*';
+    const isLocalHost = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const originAllowed = !reqOrigin || reqOrigin === url.origin || allowedOrigins.includes(reqOrigin) || (isLocalHost && defaultDev.includes(reqOrigin));
     const securityHeaders = {
       'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': allowOrigin,
       'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Branch-Id',
       'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
-      'Access-Control-Allow-Credentials': 'true',
       'Vary': 'Origin',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'strict-origin-when-cross-origin',
       'Cache-Control': 'no-store'
     };
+    if (reqOrigin && originAllowed) {
+      securityHeaders['Access-Control-Allow-Origin'] = reqOrigin;
+      securityHeaders['Access-Control-Allow-Credentials'] = 'true';
+    }
     const json = (data, status = 200) => new Response(JSON.stringify(data), {
       status,
       headers: securityHeaders
@@ -36,9 +37,12 @@ export async function onRequest(context) {
 
     if (request.method === 'OPTIONS') {
       if (reqOrigin && !originAllowed) {
-        return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+        return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers: { 'Content-Type': 'application/json', 'Vary': 'Origin' } });
       }
       return json({ ok: true });
+    }
+    if (reqOrigin && !originAllowed) {
+      return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers: { 'Content-Type': 'application/json', 'Vary': 'Origin' } });
     }
 
     // --- Auth helpers: PBKDF2 PIN hash, sessions, rate limit, privileges ---
@@ -263,13 +267,7 @@ export async function onRequest(context) {
             ).bind(tid, 'NEO Fashion Boutique', 'Premium Apparel & Footwear', 'KSh', '+254 700 000000', 'Kimathi Street, Nairobi', tid).run();
           } catch (_) {}
 
-          // Seed default users (plain PINs automatically hash with PBKDF2 on first login)
-          const insUser = env.DB.prepare(`INSERT OR IGNORE INTO users (id, name, role, pin, phone, status, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?)`);
-          await insUser.bind('u1', 'Main Admin', 'Admin', '1234', '+254 700 000000', 'Active', tid).run();
-          await insUser.bind('u2', 'Alice Wambui', 'Salesperson', '5678', '+254 711 222333', 'Active', tid).run();
-          await insUser.bind('u3', 'Benta Akinyi', 'Manager', '0000', '+254 733 999888', 'Active', tid).run();
-
-          // Seed default roles
+          // Seed default roles only (users must be created via signup or platform provisioning)
           const adminPriv = JSON.stringify({
             dashboard: { view: true, create: true, update: true, delete: true, ownOnly: false },
             pos: { view: true, create: true, update: true, delete: true, ownOnly: false },
@@ -484,17 +482,73 @@ globalThis.__neoSchemaReady = true;
       const def = branches.find(b => b.isDefault) || branches[0];
       return def ? def.id : null;
     };
+    const getEffectiveAllowedBranches = (authUser) => {
+      if (!authUser || authUser.isAdmin || authUser.isSuperAdmin) return null;
+      const parseBranchList = (raw) => {
+        if (Array.isArray(raw)) return raw.map(String).filter(Boolean);
+        if (typeof raw === 'string' && raw.trim()) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean);
+          } catch (_) {
+            return raw.split(',').map(s => s.trim()).filter(Boolean);
+          }
+        }
+        return [];
+      };
+      const userList = parseBranchList(authUser.user && authUser.user.allowedBranches);
+      const privList = parseBranchList(authUser.privileges && authUser.privileges.allowedBranches);
+      if (userList.length && privList.length) {
+        const inter = userList.filter(b => privList.includes(b));
+        return inter.length ? inter : userList;
+      }
+      if (userList.length) return userList;
+      if (privList.length) return privList;
+      return null;
+    };
     const branchAllowedForAuth = (authUser, branchId) => {
       if (!authUser || authUser.isAdmin || authUser.isSuperAdmin) return true;
-      const list = authUser.privileges && authUser.privileges.allowedBranches;
+      const list = getEffectiveAllowedBranches(authUser);
       if (!Array.isArray(list) || !list.length) return true;
       return list.map(String).includes(String(branchId));
     };
 
     const clientIp = () => request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'unknown';
 
-    const checkRateLimit = async (_username) => {
-      // Login lockout disabled per user request
+    const checkRateLimit = async (username) => {
+      await ensureAuthTables();
+      const key = String(username || '').trim().toLowerCase();
+      const ip = clientIp();
+      const cutoff = Date.now() - LOGIN_WINDOW_MS;
+      const maxFails = (key.startsWith('signup:') || key.startsWith('change-pin:')) ? SENSITIVE_MAX_FAILS : LOGIN_MAX_FAILS;
+      try {
+        if (key) {
+          const rows = (await env.DB.prepare(
+            `SELECT ok, at FROM login_attempts WHERE LOWER(username) = ? AND at >= ? ORDER BY at DESC LIMIT 30`
+          ).bind(key, cutoff).all()).results || [];
+          let streakFails = 0;
+          let earliestFailAt = null;
+          for (const r of rows) {
+            if (Number(r.ok) === 1) break;
+            streakFails++;
+            earliestFailAt = Number(r.at) || earliestFailAt;
+          }
+          if (streakFails >= maxFails) {
+            const retryAfterMin = Math.max(1, Math.ceil(((earliestFailAt || Date.now()) + LOGIN_WINDOW_MS - Date.now()) / 60000));
+            return { blocked: true, retryAfterMin };
+          }
+        }
+        if (ip && ip !== 'unknown') {
+          const ipRow = await env.DB.prepare(
+            `SELECT COUNT(*) as c, MIN(at) as oldest FROM login_attempts WHERE ip = ? AND ok = 0 AND at >= ?`
+          ).bind(ip, cutoff).first();
+          const ipFails = Number(ipRow?.c) || 0;
+          if (ipFails >= 20) {
+            const retryAfterMin = Math.max(1, Math.ceil(((Number(ipRow?.oldest) || Date.now()) + LOGIN_WINDOW_MS - Date.now()) / 60000));
+            return { blocked: true, retryAfterMin };
+          }
+        }
+      } catch (_) {}
       return { blocked: false };
     };
     const writeSecurityAudit = async (authUser, action, entity, detail) => {
@@ -552,7 +606,7 @@ globalThis.__neoSchemaReady = true;
       if (row.userId === 'super-platform' || row.tenantId === 'platform') {
         let profileUser = null;
         try { profileUser = await env.DB.prepare('SELECT * FROM platform_profile WHERE id = 1').first(); } catch (_) {}
-        const display = (profileUser && profileUser.displayName) || (profileUser && profileUser.username) || env.SUPER_ADMIN_NAME || 'platform';
+        const display = (profileUser && profileUser.displayName) || (profileUser && profileUser.username) || env.SUPER_ADMIN_NAME || 'SuperAdmin';
         const user = {
           id: 'super-platform',
           name: display,
@@ -1104,10 +1158,10 @@ globalThis.__neoSchemaReady = true;
         await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tenant_settings (
           id TEXT PRIMARY KEY, tenantId TEXT UNIQUE, paymentMethods TEXT, salesTerms TEXT,
           loyalty TEXT, etims TEXT, salesTargets TEXT, tasks TEXT, cashups TEXT, auditLog TEXT,
-          itemVariances TEXT, poApprovalLimit REAL DEFAULT 0, returnRequests TEXT, creditPolicy TEXT DEFAULT 'warn', updatedAt INTEGER
+          itemVariances TEXT, poApprovalLimit REAL DEFAULT 0, returnRequests TEXT, creditPolicy TEXT DEFAULT 'warn', wizardCompleted INTEGER DEFAULT 1, updatedAt INTEGER
         )`).run();
       } catch (_) {}
-      for (const col of ['tasks TEXT', 'cashups TEXT', 'auditLog TEXT', 'itemVariances TEXT', 'poApprovalLimit REAL DEFAULT 0', 'returnRequests TEXT', 'creditPolicy TEXT DEFAULT \'warn\'']) {
+      for (const col of ['tasks TEXT', 'cashups TEXT', 'auditLog TEXT', 'itemVariances TEXT', 'poApprovalLimit REAL DEFAULT 0', 'returnRequests TEXT', 'creditPolicy TEXT DEFAULT \'warn\'', 'wizardCompleted INTEGER DEFAULT 1']) {
         try { await env.DB.prepare(`ALTER TABLE tenant_settings ADD COLUMN ${col}`).run(); } catch (_) {}
       }
     };
@@ -1276,6 +1330,16 @@ globalThis.__neoSchemaReady = true;
       } catch (_) {}
       let userAllowedBr = user.allowedBranches;
       try { if (typeof userAllowedBr === 'string') userAllowedBr = JSON.parse(userAllowedBr || '[]'); } catch (_) { userAllowedBr = []; }
+      let needsBusinessWizard = false;
+      if ((user.role || '').toLowerCase() === 'admin') {
+        try {
+          await ensureTenantSettingsSchema();
+          const tsRow = await env.DB.prepare(`SELECT wizardCompleted FROM tenant_settings WHERE tenantId = ? LIMIT 1`).bind(userTenantId).first();
+          if (tsRow && tsRow.wizardCompleted !== null && tsRow.wizardCompleted !== undefined && Number(tsRow.wizardCompleted) === 0) {
+            needsBusinessWizard = true;
+          }
+        } catch (_) {}
+      }
       return json({
         token,
         expiresAt,
@@ -1291,7 +1355,8 @@ globalThis.__neoSchemaReady = true;
         },
         privileges: parsePrivileges(roleRow?.privileges),
         tenant: tenant ? { id: tenant.id, name: tenant.name, plan: tenant.plan, status: tenant.status, maxUsers: tenant.maxUsers, maxBranches: tenant.maxBranches } : null,
-        shopProfile: loginShopProfile || null
+        shopProfile: loginShopProfile || null,
+        needsBusinessWizard
       });
     }
 
@@ -1396,6 +1461,12 @@ globalThis.__neoSchemaReady = true;
             `INSERT INTO branches (id, tenantId, name, address, phone, status, isDefault, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
           ).bind(branchId, tenantId, locationName, body.locationAddress || '', body.phone || '', 'Active', 1, Date.now()).run();
         } catch (_) {}
+        try {
+          await ensureTenantSettingsSchema();
+          await env.DB.prepare(
+            `INSERT OR IGNORE INTO tenant_settings (id, tenantId, wizardCompleted, updatedAt) VALUES (?, ?, 0, ?)`
+          ).bind(tenantId, tenantId, Date.now()).run();
+        } catch (_) {}
       } catch (e) {
         return json({ error: 'Signup failed: ' + (e.message || 'error') }, 500);
       }
@@ -1409,25 +1480,31 @@ globalThis.__neoSchemaReady = true;
       const body = await request.json();
       const name = String(body.username || '').trim();
       const pin = String(body.pin || '');
+      if (!name || !pin) return json({ error: 'Username and PIN required' }, 400);
+      const rlSuper = await checkRateLimit('super:' + name);
+      if (rlSuper.blocked) {
+        return json({ error: `Too many failed logins. Try again in ${rlSuper.retryAfterMin} minutes.` }, 429);
+      }
       const envPin = String(env.SUPER_ADMIN_PIN || '').trim();
       let profileUser = null;
       try {
         await ensureAuthTables();
         profileUser = await env.DB.prepare('SELECT * FROM platform_profile WHERE id = 1').first();
       } catch (_) {}
-      const envName = String((profileUser && profileUser.username) || env.SUPER_ADMIN_NAME || 'platform').trim();
+      const envName = String((profileUser && profileUser.username) || env.SUPER_ADMIN_NAME || '').trim();
       let ok = false;
       let user = null;
-      if (!envPin) {
-        // Still allow DB SuperAdmin users if any
+      if (!envPin || !envName) {
+        // Allow DB SuperAdmin users if any
         try {
           const users = (await env.DB.prepare('SELECT * FROM users').all()).results || [];
           user = users.find(u => (u.name || '').toLowerCase() === name.toLowerCase() && (u.role || '').toLowerCase() === 'superadmin') || null;
           if (user && await verifyPin(pin, user.pin) && user.status === 'Active') ok = true;
         } catch (_) {}
         if (!ok) {
+          await recordLoginAttempt('super:' + name, false);
           return json({
-            error: 'Platform login not configured. In Cloudflare Pages → Settings → Environment variables, set SUPER_ADMIN_NAME and SUPER_ADMIN_PIN (Production), then redeploy.'
+            error: 'Platform login is not configured. Set SUPER_ADMIN_NAME and SUPER_ADMIN_PIN in your server environment or sign in with a SuperAdmin account.'
           }, 401);
         }
       } else if (name.toLowerCase() === envName.toLowerCase() && pin === envPin) {
@@ -1440,7 +1517,11 @@ globalThis.__neoSchemaReady = true;
           if (user && await verifyPin(pin, user.pin) && user.status === 'Active') ok = true;
         } catch (_) {}
       }
-      if (!ok || !user) return json({ error: 'Invalid super-admin credentials. Use SUPER_ADMIN_NAME / SUPER_ADMIN_PIN from Cloudflare env, or a user with role SuperAdmin.' }, 401);
+      if (!ok || !user) {
+        await recordLoginAttempt('super:' + name, false);
+        return json({ error: 'Invalid super-admin credentials.' }, 401);
+      }
+      await recordLoginAttempt('super:' + name, true);
       const tokenBytes = randomBytes(32);
       const token = b64(tokenBytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
       const expiresAt = Date.now() + SESSION_MS;
@@ -1874,6 +1955,12 @@ globalThis.__neoSchemaReady = true;
             `INSERT INTO tenants (id, name, plan, status, maxUsers, maxBranches, createdAt, ownerEmail, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
           ).bind(tid, body.name || 'New Shop', plan, status, maxUsers ?? lim.maxUsers ?? 5, maxBranches ?? lim.maxBranches ?? 1, Date.now(), body.ownerEmail || '', body.notes || 'created-by-platform').run();
         }
+        try {
+          await ensureTenantSettingsSchema();
+          await env.DB.prepare(
+            `INSERT OR IGNORE INTO tenant_settings (id, tenantId, wizardCompleted, updatedAt) VALUES (?, ?, 0, ?)`
+          ).bind(tid, tid, Date.now()).run();
+        } catch (_) {}
         try { await writeSecurityAudit(auth, 'create', 'tenant', tid); } catch (_) {}
         return json({ success: true, id: tid, trialEndsAt });
       }
@@ -2108,8 +2195,8 @@ globalThis.__neoSchemaReady = true;
         let row = null;
         try { row = await env.DB.prepare('SELECT * FROM platform_profile WHERE id = 1').first(); } catch (_) {}
         return json({
-          profile: row || { username: env.SUPER_ADMIN_NAME || 'platform', displayName: auth.user?.name || 'Platform' },
-          note: 'Username used for Platform login is SUPER_ADMIN_NAME in Cloudflare env unless you rely on a SuperAdmin DB user. Display name is stored here.'
+          profile: row || { username: env.SUPER_ADMIN_NAME || '', displayName: auth.user?.name || 'Platform' },
+          note: 'Username used for Platform login is configured via SUPER_ADMIN_NAME environment variable unless you use a SuperAdmin database account. Display name is stored here.'
         });
       }
       if (request.method === 'PUT' || request.method === 'POST') {
@@ -2135,7 +2222,7 @@ globalThis.__neoSchemaReady = true;
         return json({
           success: true,
           profile: { username, displayName },
-          warning: 'Env SUPER_ADMIN_NAME still controls env-based Platform login until you change it in Cloudflare to match the new username.'
+          warning: 'Environment variable SUPER_ADMIN_NAME continues to govern env-based Platform login until updated on the server.'
         });
       }
     }
@@ -2345,6 +2432,7 @@ globalThis.__neoSchemaReady = true;
         branches: branchesList,
         stockMovements,
         tenantSettings,
+        needsBusinessWizard: !auth.isSuperAdmin && !!auth.isAdmin && !!tenantSettings && tenantSettings.wizardCompleted !== null && tenantSettings.wizardCompleted !== undefined && Number(tenantSettings.wizardCompleted) === 0,
         ...await (async () => {
           const ten = await getTenant(tidBranches);
           const planId = ten?.plan || 'starter';
@@ -4527,17 +4615,24 @@ globalThis.__neoSchemaReady = true;
       const type = (url.searchParams.get('type') || 'pnl').toLowerCase();
       const from = (url.searchParams.get('from') || '').slice(0, 10);
       const to = (url.searchParams.get('to') || '').slice(0, 10);
-      const branchId = url.searchParams.get('branchId') || '';
+      const rawBranchParam = (url.searchParams.get('branchId') || requestBranchId() || '').trim();
+      const isBranchProfitability = type === 'branch-profitability' || type === 'branch_profitability';
+      if (!isBranchProfitability && rawBranchParam === 'all') {
+        return json({ error: 'Consolidated all-branches financial reports are disabled. Select a specific location or view Branch Profitability.' }, 400);
+      }
+      const allowedListForUser = getEffectiveAllowedBranches(auth);
+      let branchId = rawBranchParam;
+      if (!isBranchProfitability) {
+        if (!branchId) branchId = (await resolveBranchId(tid, null)) || '';
+        if (branchId && !branchAllowedForAuth(auth, branchId)) {
+          return deny('Not allowed to view financial reports for this location.');
+        }
+      } else if (branchId && branchId !== 'all' && !branchAllowedForAuth(auth, branchId)) {
+        return deny('Not allowed to view financial reports for this location.');
+      }
       const groupBy = (url.searchParams.get('groupBy') || 'day').toLowerCase();
       const compareFrom = (url.searchParams.get('compareFrom') || '').slice(0, 10);
       const compareTo = (url.searchParams.get('compareTo') || '').slice(0, 10);
-
-      const inDate = (d) => {
-        const s = String(d || '').slice(0, 10);
-        if (from && s < from) return false;
-        if (to && s > to) return false;
-        return true;
-      };
 
       // Chart of accounts with period balances
       if (type === 'chart-of-accounts' || type === 'coa') {
@@ -4548,7 +4643,7 @@ globalThis.__neoSchemaReady = true;
         const binds = [tid];
         if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
         if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
-        if (branchId && branchId !== 'all') { sql += ` AND (j.branchId = ? OR j.branchId IS NULL OR j.branchId = '')`; binds.push(branchId); }
+        if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
         sql += ` GROUP BY jl.accountCode`;
         const lines = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
         const map = {};
@@ -4556,7 +4651,6 @@ globalThis.__neoSchemaReady = true;
         const enriched = accounts.map(a => {
           const m = map[a.code] || { debit: 0, credit: 0 };
           const typeA = String(a.type || '').toLowerCase();
-          // Normal balance: asset/expense debit; liability/equity/revenue credit
           let balance = 0;
           if (typeA === 'asset' || typeA === 'expense' || String(a.code).startsWith('1') || String(a.code).startsWith('5')) {
             balance = Math.round((m.debit - m.credit) * 100) / 100;
@@ -4582,6 +4676,7 @@ globalThis.__neoSchemaReady = true;
         const binds = [tid];
         if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
         if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+        if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
         sql += ` GROUP BY jl.accountCode`;
         const lines = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
         const map = {};
@@ -4592,7 +4687,7 @@ globalThis.__neoSchemaReady = true;
         });
         const totalDebit = trial.reduce((s, t) => s + t.debit, 0);
         const totalCredit = trial.reduce((s, t) => s + t.credit, 0);
-        return json({ type, from: from || null, to: to || null, trial, totalDebit, totalCredit, balanced: Math.abs(totalDebit - totalCredit) < 0.05 });
+        return json({ type, from: from || null, to: to || null, branchId: branchId || null, trial, totalDebit, totalCredit, balanced: Math.abs(totalDebit - totalCredit) < 0.05 });
       }
 
       // P&L
@@ -4602,12 +4697,13 @@ globalThis.__neoSchemaReady = true;
                    LEFT JOIN chart_of_accounts a ON a.tenantId = jl.tenantId AND a.code = jl.accountCode
                    WHERE jl.tenantId = ? AND IFNULL(j.voided,0) = 0`;
         const binds = [tid];
-        if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
-        if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+        if (from) { sql += ` AND substr(j.entryDate,1,10) >= ?`; binds.push(from); }
+        if (to) { sql += ` AND substr(j.entryDate,1,10) <= ?`; binds.push(to); }
+        if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
         sql += ` GROUP BY jl.accountCode`;
         const rows = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
         const income = [], expenses = [];
-        let totalIncome = 0, totalExpense = 0;
+        let totalIncome = 0, totalExpense = 0, cogs = 0;
         for (const r of rows) {
           const typeA = (r.accountType || '').toLowerCase();
           const code = r.accountCode;
@@ -4617,12 +4713,91 @@ globalThis.__neoSchemaReady = true;
             if (Math.abs(amt) > 0.001) { income.push({ code, name: r.accountName || code, amount: amt }); totalIncome += amt; }
           } else if (typeA === 'expense' || String(code).startsWith('5')) {
             const amt = Math.round((dr - cr) * 100) / 100;
-            if (Math.abs(amt) > 0.001) { expenses.push({ code, name: r.accountName || code, amount: amt }); totalExpense += amt; }
+            if (Math.abs(amt) > 0.001) {
+              expenses.push({ code, name: r.accountName || code, amount: amt });
+              totalExpense += amt;
+              if (String(code).startsWith('50') || (r.accountName || '').toLowerCase().includes('cost of goods') || (r.accountName || '').toLowerCase().includes('cogs')) {
+                cogs += amt;
+              }
+            }
           }
         }
+
+        if (income.length === 0 && expenses.length === 0) {
+          let salesSql = `SELECT totalAmount, subtotal, taxAmount, taxInclusive, items, returnHistory FROM sales WHERE tenantId = ?`;
+          const sBinds = [tid];
+          if (from) { salesSql += ` AND substr(date,1,10) >= ?`; sBinds.push(from); }
+          if (to) { salesSql += ` AND substr(date,1,10) <= ?`; sBinds.push(to); }
+          if (branchId && branchId !== 'all') { salesSql += ` AND branchId = ?`; sBinds.push(branchId); }
+          const salesRows = (await env.DB.prepare(salesSql).bind(...sBinds).all()).results || [];
+
+          let rev = 0;
+          let calcCogs = 0;
+          for (const s of salesRows) {
+            const totalAmt = Number(s.totalAmount) || 0;
+            const taxAmt = Number(s.taxAmount) || 0;
+            rev += Math.max(0, totalAmt - taxAmt);
+            let items = [];
+            try { items = typeof s.items === 'string' ? JSON.parse(s.items) : (s.items || []); } catch (_) {}
+            for (const it of items) {
+              const qty = Math.max(0, (Number(it.qty ?? it.quantity) || 0) - (Number(it.returnedSaleableQty) || 0));
+              const buy = Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0;
+              calcCogs += qty * buy;
+            }
+          }
+
+          let expSql = `SELECT category, SUM(amount) as total FROM expenses WHERE tenantId = ?`;
+          const eBinds = [tid];
+          if (from) { expSql += ` AND substr(date,1,10) >= ?`; eBinds.push(from); }
+          if (to) { expSql += ` AND substr(date,1,10) <= ?`; eBinds.push(to); }
+          if (branchId && branchId !== 'all') { expSql += ` AND branchId = ?`; eBinds.push(branchId); }
+          expSql += ` GROUP BY category`;
+          const expRows = (await env.DB.prepare(expSql).bind(...eBinds).all()).results || [];
+
+          const totInc = Math.round(rev * 100) / 100;
+          const roundedCogs = Math.round(calcCogs * 100) / 100;
+          const fallbackIncome = totInc > 0 ? [{ code: '4000', name: 'Sales Revenue', amount: totInc }] : [];
+          const fallbackExpenses = [];
+          if (roundedCogs > 0) {
+            fallbackExpenses.push({ code: '5000', name: 'Cost of Goods Sold (COGS)', amount: roundedCogs });
+          }
+          let totalExp = roundedCogs;
+          for (const er of expRows) {
+            const amt = Math.round((Number(er.total) || 0) * 100) / 100;
+            if (amt > 0) {
+              fallbackExpenses.push({ code: '5100', name: er.category || 'Operating Expense', amount: amt });
+              totalExp += amt;
+            }
+          }
+          totalExp = Math.round(totalExp * 100) / 100;
+          const operatingExpenses = Math.round((totalExp - roundedCogs) * 100) / 100;
+          return json({
+            type, from: from || null, to: to || null, branchId: branchId || null,
+            income: fallbackIncome,
+            expenses: fallbackExpenses,
+            totalIncome: totInc,
+            cogs: roundedCogs,
+            grossProfit: Math.round((totInc - roundedCogs) * 100) / 100,
+            operatingExpenses,
+            totalExpense: totalExp,
+            netProfit: Math.round((totInc - totalExp) * 100) / 100
+          });
+        }
+
         totalIncome = Math.round(totalIncome * 100) / 100;
         totalExpense = Math.round(totalExpense * 100) / 100;
-        return json({ type, from: from || null, to: to || null, income, expenses, totalIncome, totalExpense, netProfit: Math.round((totalIncome - totalExpense) * 100) / 100 });
+        cogs = Math.round(cogs * 100) / 100;
+        const operatingExpenses = Math.round((totalExpense - cogs) * 100) / 100;
+        return json({
+          type, from: from || null, to: to || null, branchId: branchId || null,
+          income, expenses,
+          totalIncome,
+          cogs,
+          grossProfit: Math.round((totalIncome - cogs) * 100) / 100,
+          operatingExpenses,
+          totalExpense,
+          netProfit: Math.round((totalIncome - totalExpense) * 100) / 100
+        });
       }
 
       // Balance sheet
@@ -4633,6 +4808,7 @@ globalThis.__neoSchemaReady = true;
                    WHERE jl.tenantId = ? AND IFNULL(j.voided,0) = 0`;
         const binds = [tid];
         if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+        if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
         sql += ` GROUP BY jl.accountCode`;
         const rows = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
         const assets = [], liabilities = [], equity = [];
@@ -4645,7 +4821,7 @@ globalThis.__neoSchemaReady = true;
           if (typeA === 'asset' || code.startsWith('1')) { bal = Math.round((dr - cr) * 100) / 100; bucket = 'asset'; }
           else if (typeA === 'liability' || code.startsWith('2')) { bal = Math.round((cr - dr) * 100) / 100; bucket = 'liability'; }
           else if (typeA === 'equity' || code.startsWith('3')) { bal = Math.round((cr - dr) * 100) / 100; bucket = 'equity'; }
-          else if (typeA === 'revenue' || code.startsWith('4')) { bal = Math.round((cr - dr) * 100) / 100; bucket = 'equity'; } // retained via P&L
+          else if (typeA === 'revenue' || code.startsWith('4')) { bal = Math.round((cr - dr) * 100) / 100; bucket = 'equity'; }
           else if (typeA === 'expense' || code.startsWith('5')) { bal = Math.round((dr - cr) * 100) / 100; bucket = 'equity_neg'; }
           if (Math.abs(bal) < 0.001) continue;
           const row = { code, name: r.accountName || code, balance: bal };
@@ -4654,7 +4830,7 @@ globalThis.__neoSchemaReady = true;
           else if (bucket === 'equity') { equity.push(row); te += bal; }
           else if (bucket === 'equity_neg') { equity.push({ ...row, balance: -bal, name: (r.accountName || code) + ' (expense)' }); te -= bal; }
         }
-        return json({ type, asOf: to || null, assets, liabilities, equity, totalAssets: Math.round(ta * 100) / 100, totalLiabilities: Math.round(tl * 100) / 100, totalEquity: Math.round(te * 100) / 100 });
+        return json({ type, asOf: to || null, branchId: branchId || null, assets, liabilities, equity, totalAssets: Math.round(ta * 100) / 100, totalLiabilities: Math.round(tl * 100) / 100, totalEquity: Math.round(te * 100) / 100 });
       }
 
       // General ledger
@@ -4667,12 +4843,13 @@ globalThis.__neoSchemaReady = true;
         if (accountCode) { sql += ` AND jl.accountCode = ?`; binds.push(accountCode); }
         if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
         if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+        if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
         sql += ` ORDER BY j.entryDate, j.createdAt, jl.id LIMIT 1000`;
         const lines = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
-        return json({ type, from: from || null, to: to || null, accountCode: accountCode || null, lines });
+        return json({ type, from: from || null, to: to || null, branchId: branchId || null, accountCode: accountCode || null, lines });
       }
 
-      // Cash flow (from cash/mpesa journal lines classified by sourceType)
+      // Cash flow
       if (type === 'cash-flow') {
         let sql = `SELECT j.sourceType, j.entryDate, jl.accountCode, jl.debit, jl.credit, jl.memo, j.description
                    FROM journal_lines jl INNER JOIN journals j ON j.id = jl.journalId
@@ -4680,6 +4857,7 @@ globalThis.__neoSchemaReady = true;
         const binds = [tid];
         if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
         if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+        if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
         const rows = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
         const operating = [], investing = [], financing = [];
         let op = 0, inv = 0, fin = 0;
@@ -4687,8 +4865,7 @@ globalThis.__neoSchemaReady = true;
           const net = Math.round(((Number(r.debit) || 0) - (Number(r.credit) || 0)) * 100) / 100;
           const st = String(r.sourceType || '');
           const entry = { date: r.entryDate, sourceType: st, accountCode: r.accountCode, amount: net, memo: r.memo || r.description };
-          // Classify
-          if (st === 'sale' || st === 'customer-receipt' || st === 'expense' || st === 'po-payment' || st === 'sales-return' || st === 'po-return') {
+          if (st === 'sale' || st === 'customer-receipt' || st === 'expense' || st === 'expense-payment' || st === 'po-payment' || st === 'sales-return' || st === 'po-return') {
             operating.push(entry); op += net;
           } else if (st === 'manual' || st === 'reversal') {
             financing.push(entry); fin += net;
@@ -4697,7 +4874,7 @@ globalThis.__neoSchemaReady = true;
           }
         }
         return json({
-          type, from: from || null, to: to || null,
+          type, from: from || null, to: to || null, branchId: branchId || null,
           operating, investing, financing,
           netOperating: Math.round(op * 100) / 100,
           netInvesting: Math.round(inv * 100) / 100,
@@ -4706,14 +4883,18 @@ globalThis.__neoSchemaReady = true;
         });
       }
 
-      // Sales / COGS / margin from sales table
       const loadSales = async () => {
         let q = `SELECT * FROM sales WHERE tenantId = ?`;
         const b = [tid];
         if (from) { q += ` AND substr(date,1,10) >= ?`; b.push(from); }
         if (to) { q += ` AND substr(date,1,10) <= ?`; b.push(to); }
         if (branchId && branchId !== 'all') { q += ` AND branchId = ?`; b.push(branchId); }
-        return (await env.DB.prepare(q).bind(...b).all()).results || [];
+        const rows = (await env.DB.prepare(q).bind(...b).all()).results || [];
+        if (Array.isArray(allowedListForUser) && allowedListForUser.length) {
+          const allowSet = new Set(allowedListForUser.map(String));
+          return rows.filter(r => r.branchId && allowSet.has(String(r.branchId)));
+        }
+        return rows;
       };
       const loadExpenses = async () => {
         let q = `SELECT * FROM expenses WHERE tenantId = ?`;
@@ -4721,7 +4902,12 @@ globalThis.__neoSchemaReady = true;
         if (from) { q += ` AND substr(date,1,10) >= ?`; b.push(from); }
         if (to) { q += ` AND substr(date,1,10) <= ?`; b.push(to); }
         if (branchId && branchId !== 'all') { q += ` AND branchId = ?`; b.push(branchId); }
-        return (await env.DB.prepare(q).bind(...b).all()).results || [];
+        const rows = (await env.DB.prepare(q).bind(...b).all()).results || [];
+        if (Array.isArray(allowedListForUser) && allowedListForUser.length) {
+          const allowSet = new Set(allowedListForUser.map(String));
+          return rows.filter(r => r.branchId && allowSet.has(String(r.branchId)));
+        }
+        return rows;
       };
 
       const parseItems = (s) => {
@@ -4745,18 +4931,21 @@ globalThis.__neoSchemaReady = true;
           } else if (groupBy === 'month') key = day.slice(0, 7);
           else if (groupBy === 'branch') key = s.branchId || 'default';
           else if (groupBy === 'item' || groupBy === 'category') {
+            const taxRate = Number(s.taxRate) || 0;
             for (const it of parseItems(s.items)) {
               const k = groupBy === 'item' ? (it.name || it.id || 'item') : (it.category || 'Uncategorized');
               if (!buckets[k]) buckets[k] = { key: k, revenue: 0, qty: 0, count: 0 };
-              const line = (Number(it.price) || 0) * (Number(it.qty) || 0);
+              const netQty = Math.max(0, (Number(it.qty ?? it.quantity) || 0) - (Number(it.returnedQty) || 0));
+              const rawLine = (Number(it.price) || 0) * netQty;
+              const line = (s.taxInclusive && taxRate > 0) ? (rawLine / (1 + taxRate / 100)) : rawLine;
               buckets[k].revenue += line;
-              buckets[k].qty += Number(it.qty) || 0;
+              buckets[k].qty += netQty;
               buckets[k].count += 1;
             }
             continue;
           }
           if (!buckets[key]) buckets[key] = { key, revenue: 0, count: 0 };
-          buckets[key].revenue += Number(s.totalAmount) || 0;
+          buckets[key].revenue += Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.taxAmount) || 0));
           buckets[key].count += 1;
         }
         const rows = Object.values(buckets).map(r => ({ ...r, revenue: Math.round(r.revenue * 100) / 100 })).sort((a, b) => b.revenue - a.revenue);
@@ -4768,10 +4957,14 @@ globalThis.__neoSchemaReady = true;
         const buckets = {};
         let totalRev = 0, totalCogs = 0;
         for (const s of salesRows) {
+          const taxRate = Number(s.taxRate) || 0;
           for (const it of parseItems(s.items)) {
-            const qty = Number(it.qty) || 0;
-            const rev = (Number(it.price) || 0) * qty;
-            const cogs = (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0) * qty;
+            const origQty = Number(it.qty ?? it.quantity) || 0;
+            const netQty = Math.max(0, origQty - (Number(it.returnedQty) || 0));
+            const cogsQty = Math.max(0, origQty - (Number(it.returnedSaleableQty) || 0));
+            const rawRev = (Number(it.price) || 0) * netQty;
+            const rev = (s.taxInclusive && taxRate > 0) ? (rawRev / (1 + taxRate / 100)) : rawRev;
+            const cogs = (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0) * cogsQty;
             totalRev += rev; totalCogs += cogs;
             let key = 'All';
             if (groupBy === 'item') key = it.name || it.id || 'item';
@@ -4782,7 +4975,7 @@ globalThis.__neoSchemaReady = true;
             if (!buckets[key]) buckets[key] = { key, revenue: 0, cogs: 0, qty: 0 };
             buckets[key].revenue += rev;
             buckets[key].cogs += cogs;
-            buckets[key].qty += qty;
+            buckets[key].qty += netQty;
           }
         }
         const rows = Object.values(buckets).map(r => {
@@ -4836,8 +5029,9 @@ globalThis.__neoSchemaReady = true;
                      LEFT JOIN chart_of_accounts a ON a.tenantId = jl.tenantId AND a.code = jl.accountCode
                      WHERE jl.tenantId = ? AND IFNULL(j.voided,0) = 0`;
           const binds = [tid];
-          if (f) { sql += ` AND j.entryDate >= ?`; binds.push(f); }
-          if (t) { sql += ` AND j.entryDate <= ?`; binds.push(t); }
+          if (f) { sql += ` AND substr(j.entryDate,1,10) >= ?`; binds.push(f); }
+          if (t) { sql += ` AND substr(j.entryDate,1,10) <= ?`; binds.push(t); }
+          if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
           sql += ` GROUP BY jl.accountCode`;
           const rows = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
           let income = 0, expense = 0;
@@ -4848,12 +5042,35 @@ globalThis.__neoSchemaReady = true;
             if (typeA === 'revenue' || code.startsWith('4')) income += (cr - dr);
             else if (typeA === 'expense' || code.startsWith('5')) expense += (dr - cr);
           }
+          if (rows.length === 0) {
+            let sSql = `SELECT totalAmount, taxAmount, items FROM sales WHERE tenantId = ?`;
+            const sb = [tid];
+            if (f) { sSql += ` AND substr(date,1,10) >= ?`; sb.push(f); }
+            if (t) { sSql += ` AND substr(date,1,10) <= ?`; sb.push(t); }
+            if (branchId && branchId !== 'all') { sSql += ` AND branchId = ?`; sb.push(branchId); }
+            const sRows = (await env.DB.prepare(sSql).bind(...sb).all()).results || [];
+            for (const s of sRows) {
+              income += Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.taxAmount) || 0));
+              for (const it of parseItems(s.items)) {
+                const cogsQty = Math.max(0, (Number(it.qty ?? it.quantity) || 0) - (Number(it.returnedSaleableQty) || 0));
+                expense += cogsQty * (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0);
+              }
+            }
+            let eSql = `SELECT SUM(amount) as total FROM expenses WHERE tenantId = ?`;
+            const eb = [tid];
+            if (f) { eSql += ` AND substr(date,1,10) >= ?`; eb.push(f); }
+            if (t) { eSql += ` AND substr(date,1,10) <= ?`; eb.push(t); }
+            if (branchId && branchId !== 'all') { eSql += ` AND branchId = ?`; eb.push(branchId); }
+            const eRow = await env.DB.prepare(eSql).bind(...eb).first().catch(() => null);
+            expense += Number(eRow?.total) || 0;
+          }
           return { income: Math.round(income * 100) / 100, expense: Math.round(expense * 100) / 100, net: Math.round((income - expense) * 100) / 100 };
         };
         const current = await runPnl(from, to);
         const previous = await runPnl(compareFrom || from, compareTo || to);
         return json({
           type,
+          branchId: branchId || null,
           current: { from: from || null, to: to || null, ...current },
           previous: { from: compareFrom || null, to: compareTo || null, ...previous },
           variance: {
@@ -4876,11 +5093,11 @@ globalThis.__neoSchemaReady = true;
         for (const s of salesRows) {
           const k = s.branchId || 'default';
           const b = ensure(k);
-          b.revenue += Number(s.totalAmount) || 0;
+          b.revenue += Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.taxAmount) || 0));
           b.salesCount += 1;
           for (const it of parseItems(s.items)) {
-            const qty = Number(it.qty) || 0;
-            b.cogs += (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0) * qty;
+            const cogsQty = Math.max(0, (Number(it.qty ?? it.quantity) || 0) - (Number(it.returnedSaleableQty) || 0));
+            b.cogs += (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0) * cogsQty;
           }
         }
         for (const e of expRows) {
@@ -4888,7 +5105,6 @@ globalThis.__neoSchemaReady = true;
           const b = ensure(k);
           b.expenses += Number(e.amount) || 0;
         }
-        // Resolve branch names if possible
         let branchNames = {};
         try {
           const br = (await env.DB.prepare(`SELECT id, name FROM branches WHERE tenantId = ?`).bind(tid).all()).results || [];
@@ -4916,11 +5132,10 @@ globalThis.__neoSchemaReady = true;
         });
       }
 
-      // Tax summary (sales tax + purchase tax from POs + expense tax + ledger 2100)
+      // Tax summary
       if (type === 'tax-summary' || type === 'tax_summary') {
         const salesRows = await loadSales();
         const expRows = await loadExpenses();
-        // Load purchase orders for purchase (input) tax
         let poRows = [];
         try {
           let pq = `SELECT * FROM purchase_orders WHERE tenantId = ?`;
@@ -4939,17 +5154,11 @@ globalThis.__neoSchemaReady = true;
           const total = Number(s.totalAmount) || 0;
           const rate = Number(s.taxRate) || 0;
           let tax = Number(s.taxAmount) || 0;
-          // Derive tax if missing using inclusive/exclusive (same formula as POS)
           if (!tax && rate > 0 && total > 0) {
-            if (s.taxInclusive) {
-              tax = total - (total / (1 + rate / 100));
-            } else {
-              tax = total - (total / (1 + rate / 100));
-            }
+            tax = total - (total / (1 + rate / 100));
           }
           tax = Math.round(tax * 100) / 100;
           salesTaxCollected += tax;
-          // Taxable base = amount excluding tax (works for both inclusive & exclusive totals)
           salesTaxable += Math.max(0, total - tax);
           if (tax > 0 || rate > 0) salesCount += 1;
           const rk = String(rate || '0');
@@ -4962,14 +5171,8 @@ globalThis.__neoSchemaReady = true;
           const total = Number(po.amount) || 0;
           const rate = Number(po.taxRate) || 0;
           let tax = Number(po.taxAmount) || 0;
-          // Derive tax from amount using inclusive/exclusive rules (same approach as sales)
           if (!tax && rate > 0 && total > 0) {
-            if (po.taxInclusive) {
-              tax = total - (total / (1 + rate / 100));
-            } else {
-              // amount stored as base+tax when exclusive
-              tax = total - (total / (1 + rate / 100));
-            }
+            tax = total - (total / (1 + rate / 100));
           }
           tax = Math.round(tax * 100) / 100;
           purchaseTax += tax;
@@ -4984,13 +5187,8 @@ globalThis.__neoSchemaReady = true;
           const total = Number(e.amount) || 0;
           const rate = Number(e.taxRate) || 0;
           let tax = Number(e.taxAmount) || 0;
-          // Same inclusive/exclusive derivation as sales / purchases
           if (!tax && rate > 0 && total > 0) {
-            if (e.taxInclusive) {
-              tax = total - (total / (1 + rate / 100));
-            } else {
-              tax = total - (total / (1 + rate / 100));
-            }
+            tax = total - (total / (1 + rate / 100));
           }
           tax = Math.round(tax * 100) / 100;
           expenseTax += tax;
@@ -4998,8 +5196,6 @@ globalThis.__neoSchemaReady = true;
         }
 
         const totalInputTax = purchaseTax + expenseTax;
-
-        // Ledger tax payable movements
         let ledgerTaxDr = 0, ledgerTaxCr = 0;
         try {
           let sql = `SELECT SUM(jl.debit) as dr, SUM(jl.credit) as cr FROM journal_lines jl
@@ -5008,6 +5204,7 @@ globalThis.__neoSchemaReady = true;
           const binds = [tid];
           if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
           if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+          if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
           const row = await env.DB.prepare(sql).bind(...binds).first();
           ledgerTaxDr = Number(row?.dr) || 0;
           ledgerTaxCr = Number(row?.cr) || 0;
@@ -5042,7 +5239,7 @@ globalThis.__neoSchemaReady = true;
     }
 
 
-    // Profit & Loss for selected period (from journal lines)
+    // Profit & Loss for selected period (from journal lines with operational fallback)
     if ((routeType === 'ledger-pnl' || routeType === 'ledger_pnl') && request.method === 'GET') {
       if (!auth) return deny('Auth required');
       const tid = auth.tenantId || 'tenant-default';
@@ -5050,6 +5247,14 @@ globalThis.__neoSchemaReady = true;
       const url = new URL(request.url);
       const from = (url.searchParams.get('from') || '').slice(0, 10);
       const to = (url.searchParams.get('to') || '').slice(0, 10);
+      const rawBrPnl = (url.searchParams.get('branchId') || requestBranchId() || '').trim();
+      if (rawBrPnl === 'all') {
+        return json({ error: 'Consolidated all-branches P&L is disabled. Select a specific location or view Branch Profitability.' }, 400);
+      }
+      const branchId = rawBrPnl || (await resolveBranchId(tid, null)) || '';
+      if (branchId && !branchAllowedForAuth(auth, branchId)) {
+        return deny('Not allowed to view financial P&L for this location.');
+      }
       let sql = `SELECT jl.accountCode, a.name as accountName, a.type as accountType,
                         SUM(jl.debit) as dr, SUM(jl.credit) as cr
                  FROM journal_lines jl
@@ -5057,41 +5262,87 @@ globalThis.__neoSchemaReady = true;
                  LEFT JOIN chart_of_accounts a ON a.tenantId = jl.tenantId AND a.code = jl.accountCode
                  WHERE jl.tenantId = ? AND IFNULL(j.voided,0) = 0`;
       const binds = [tid];
-      if (from) { sql += ` AND j.entryDate >= ?`; binds.push(from); }
-      if (to) { sql += ` AND j.entryDate <= ?`; binds.push(to); }
+      if (from) { sql += ` AND substr(j.entryDate,1,10) >= ?`; binds.push(from); }
+      if (to) { sql += ` AND substr(j.entryDate,1,10) <= ?`; binds.push(to); }
+      if (branchId && branchId !== 'all') { sql += ` AND j.branchId = ?`; binds.push(branchId); }
       sql += ` GROUP BY jl.accountCode`;
       const rows = (await env.DB.prepare(sql).bind(...binds).all()).results || [];
       const income = [];
       const expenses = [];
-      let totalIncome = 0, totalExpense = 0;
+      let totalIncome = 0, totalExpense = 0, cogs = 0;
       for (const r of rows) {
         const type = (r.accountType || '').toLowerCase();
         const code = r.accountCode;
         const dr = Number(r.dr) || 0;
         const cr = Number(r.cr) || 0;
-        // Revenue: credit-normal; expense: debit-normal
-        if (type === 'revenue' || code.startsWith('4')) {
+        if (type === 'revenue' || String(code).startsWith('4')) {
           const amt = Math.round((cr - dr) * 100) / 100;
           if (Math.abs(amt) > 0.001) {
             income.push({ code, name: r.accountName || code, amount: amt });
             totalIncome += amt;
           }
-        } else if (type === 'expense' || code.startsWith('5')) {
+        } else if (type === 'expense' || String(code).startsWith('5')) {
           const amt = Math.round((dr - cr) * 100) / 100;
           if (Math.abs(amt) > 0.001) {
             expenses.push({ code, name: r.accountName || code, amount: amt });
+            totalExpense += amt;
+            if (String(code).startsWith('50') || (r.accountName || '').toLowerCase().includes('cost of goods') || (r.accountName || '').toLowerCase().includes('cogs')) {
+              cogs += amt;
+            }
+          }
+        }
+      }
+      if (income.length === 0 && expenses.length === 0) {
+        let salesSql = `SELECT totalAmount, taxAmount, items FROM sales WHERE tenantId = ?`;
+        const sBinds = [tid];
+        if (from) { salesSql += ` AND substr(date,1,10) >= ?`; sBinds.push(from); }
+        if (to) { salesSql += ` AND substr(date,1,10) <= ?`; sBinds.push(to); }
+        if (branchId && branchId !== 'all') { salesSql += ` AND branchId = ?`; sBinds.push(branchId); }
+        const salesRows = (await env.DB.prepare(salesSql).bind(...sBinds).all()).results || [];
+        let rev = 0, calcCogs = 0;
+        for (const s of salesRows) {
+          rev += Math.max(0, (Number(s.totalAmount) || 0) - (Number(s.taxAmount) || 0));
+          let items = [];
+          try { items = typeof s.items === 'string' ? JSON.parse(s.items) : (s.items || []); } catch (_) {}
+          for (const it of items) {
+            const qty = Math.max(0, (Number(it.qty ?? it.quantity) || 0) - (Number(it.returnedSaleableQty) || 0));
+            calcCogs += qty * (Number(it.cogs != null ? it.cogs : it.buyingPrice) || 0);
+          }
+        }
+        let expSql = `SELECT category, SUM(amount) as total FROM expenses WHERE tenantId = ?`;
+        const eBinds = [tid];
+        if (from) { expSql += ` AND substr(date,1,10) >= ?`; eBinds.push(from); }
+        if (to) { expSql += ` AND substr(date,1,10) <= ?`; eBinds.push(to); }
+        if (branchId && branchId !== 'all') { expSql += ` AND branchId = ?`; eBinds.push(branchId); }
+        expSql += ` GROUP BY category`;
+        const expRows = (await env.DB.prepare(expSql).bind(...eBinds).all()).results || [];
+
+        totalIncome = Math.round(rev * 100) / 100;
+        cogs = Math.round(calcCogs * 100) / 100;
+        if (totalIncome > 0) income.push({ code: '4000', name: 'Sales Revenue', amount: totalIncome });
+        if (cogs > 0) expenses.push({ code: '5000', name: 'Cost of Goods Sold (COGS)', amount: cogs });
+        totalExpense = cogs;
+        for (const er of expRows) {
+          const amt = Math.round((Number(er.total) || 0) * 100) / 100;
+          if (amt > 0) {
+            expenses.push({ code: '5100', name: er.category || 'Operating Expense', amount: amt });
             totalExpense += amt;
           }
         }
       }
       totalIncome = Math.round(totalIncome * 100) / 100;
       totalExpense = Math.round(totalExpense * 100) / 100;
+      cogs = Math.round(cogs * 100) / 100;
       return json({
         from: from || null,
         to: to || null,
+        branchId: branchId || null,
         income,
         expenses,
         totalIncome,
+        cogs,
+        grossProfit: Math.round((totalIncome - cogs) * 100) / 100,
+        operatingExpenses: Math.round((totalExpense - cogs) * 100) / 100,
         totalExpense,
         netProfit: Math.round((totalIncome - totalExpense) * 100) / 100
       });
@@ -5139,7 +5390,7 @@ globalThis.__neoSchemaReady = true;
       }
     }
 
-    // TENANT SETTINGS blob (payment methods, sales terms, loyalty, etims, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests)
+    // TENANT SETTINGS blob
     if (routeType === 'tenant-settings' || routeType === 'tenant_settings') {
       const tid = auth.tenantId || 'tenant-default';
       await ensureTenantSettingsSchema();
@@ -5164,6 +5415,7 @@ globalThis.__neoSchemaReady = true;
         const poApprovalLimit = body.poApprovalLimit !== undefined && body.poApprovalLimit !== null ? Math.max(0, parseFloat(body.poApprovalLimit) || 0) : null;
         const returnRequests = body.returnRequests != null ? (typeof body.returnRequests === 'string' ? body.returnRequests : JSON.stringify(body.returnRequests)) : null;
         const creditPolicy = body.creditPolicy !== undefined ? (body.creditPolicy === 'stop' ? 'stop' : 'warn') : null;
+        const wizardCompleted = body.wizardCompleted !== undefined && body.wizardCompleted !== null ? (body.wizardCompleted ? 1 : 0) : null;
         const existing = await env.DB.prepare(`SELECT * FROM tenant_settings WHERE tenantId = ? LIMIT 1`).bind(tid).first();
         if (existing) {
           try {
@@ -5181,9 +5433,10 @@ globalThis.__neoSchemaReady = true;
                 poApprovalLimit = COALESCE(?, poApprovalLimit),
                 returnRequests = COALESCE(?, returnRequests),
                 creditPolicy = COALESCE(?, creditPolicy),
+                wizardCompleted = COALESCE(?, wizardCompleted),
                 updatedAt = ?
                WHERE tenantId = ?`
-            ).bind(pm, st, loy, et, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests, creditPolicy, Date.now(), tid).run();
+            ).bind(pm, st, loy, et, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests, creditPolicy, wizardCompleted, Date.now(), tid).run();
           } catch (_) {
             await env.DB.prepare(
               `UPDATE tenant_settings SET
@@ -5202,9 +5455,9 @@ globalThis.__neoSchemaReady = true;
         } else {
           try {
             await env.DB.prepare(
-              `INSERT INTO tenant_settings (id, tenantId, paymentMethods, salesTerms, loyalty, etims, salesTargets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests, creditPolicy, updatedAt)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            ).bind(tid, tid, pm, st, loy, et, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit ?? 0, returnRequests, creditPolicy || 'warn', Date.now()).run();
+              `INSERT INTO tenant_settings (id, tenantId, paymentMethods, salesTerms, loyalty, etims, salesTargets, tasks, cashups, auditLog, itemVariances, poApprovalLimit, returnRequests, creditPolicy, wizardCompleted, updatedAt)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(tid, tid, pm, st, loy, et, targets, tasks, cashups, auditLog, itemVariances, poApprovalLimit ?? 0, returnRequests, creditPolicy || 'warn', wizardCompleted ?? 1, Date.now()).run();
           } catch (_) {
             await env.DB.prepare(
               `INSERT INTO tenant_settings (id, tenantId, paymentMethods, salesTerms, loyalty, etims, salesTargets, tasks, cashups, auditLog, updatedAt)
@@ -5217,6 +5470,22 @@ globalThis.__neoSchemaReady = true;
         }
         return json({ success: true });
       }
+    }
+
+    if ((routeType === 'business-wizard-complete' || routeType === 'business_wizard_complete') && request.method === 'POST') {
+      if (!auth) return unauth();
+      if (auth.isSuperAdmin) return deny('Not applicable for super-admin');
+      if (!auth.isAdmin && !can(auth, 'settings', 'update')) return deny('Only business administrators can complete setup');
+      const tid = auth.tenantId || 'tenant-default';
+      await ensureTenantSettingsSchema();
+      const existing = await env.DB.prepare(`SELECT id FROM tenant_settings WHERE tenantId = ? LIMIT 1`).bind(tid).first();
+      if (existing) {
+        await env.DB.prepare(`UPDATE tenant_settings SET wizardCompleted = 1, updatedAt = ? WHERE tenantId = ?`).bind(Date.now(), tid).run();
+      } else {
+        await env.DB.prepare(`INSERT INTO tenant_settings (id, tenantId, wizardCompleted, updatedAt) VALUES (?, ?, 1, ?)`).bind(tid, tid, Date.now()).run();
+      }
+      try { await appendTenantAuditRecord(tid, auth.user?.name || 'Admin', 'update', 'business_wizard', 'Completed new business setup wizard'); } catch (_) {}
+      return json({ success: true, needsBusinessWizard: false });
     }
 
 

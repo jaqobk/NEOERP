@@ -21,7 +21,7 @@ if (fs.existsSync(schemaPath)) {
   sqlite.exec(schemaSql);
 }
 
-// Seed default shop, users, roles, categories, statuses, and sample inventory if empty
+// Ensure core multi-tenant tables exist on startup without seeding development credentials
 function seedInitialData() {
   try {
     sqlite.exec(`
@@ -49,159 +49,16 @@ function seedInitialData() {
         isDefault INTEGER DEFAULT 0,
         createdAt INTEGER
       );
+      CREATE TABLE IF NOT EXISTS login_attempts (
+        id TEXT PRIMARY KEY,
+        username TEXT,
+        ip TEXT,
+        at INTEGER,
+        ok INTEGER
+      );
     `);
-
-    const userCountRow = sqlite.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number } | undefined;
-    if (!userCountRow || userCountRow.c === 0) {
-      const now = Date.now();
-      const tid = 'tenant-default';
-      const branchId = 'br-default-main';
-
-      sqlite.prepare(
-        `INSERT OR IGNORE INTO tenants (id, name, plan, status, maxUsers, maxBranches, createdAt, ownerEmail, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(tid, 'NEO Fashion Boutique', 'business', 'active', 15, 3, now, 'admin@neofashion.co.ke', 'Default Shop');
-
-      sqlite.prepare(
-        `INSERT OR IGNORE INTO branches (id, tenantId, name, address, phone, status, isDefault, createdAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(branchId, tid, 'Main Branch - CBD', 'Kimathi Street, Nairobi', '+254 700 000000', 'Active', 1, now);
-
-      sqlite.prepare(
-        `INSERT OR IGNORE INTO shop_profile (id, name, tagline, currency, phone, location, tenantId)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      ).run(tid, 'NEO Fashion Boutique', 'Premium Apparel & Footwear', 'KSh', '+254 700 000000', 'Kimathi Street, Nairobi', tid);
-
-      // Users (plain PINs are automatically verified and upgraded to PBKDF2 on first login by server-api.js)
-      const insertUser = sqlite.prepare(
-        `INSERT OR IGNORE INTO users (id, name, role, pin, phone, status, tenantId) VALUES (?, ?, ?, ?, ?, ?, ?)`
-      );
-      insertUser.run('u1', 'Main Admin', 'Admin', '1234', '+254 700 000000', 'Active', tid);
-      insertUser.run('u2', 'Alice Wambui', 'Salesperson', '5678', '+254 711 222333', 'Active', tid);
-      insertUser.run('u3', 'Benta Akinyi', 'Manager', '0000', '+254 733 999888', 'Active', tid);
-
-      // Roles
-      const adminPriv = JSON.stringify({
-        dashboard: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        pos: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        sales: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        inventory: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        expenses: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        laybys: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        customers: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        suppliers: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        reports: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        reportSales: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportPurchase: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportExpense: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportHr: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportCustomer: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportInventory: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportAging: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportFinancial: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportLedger: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        settings: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        purchase: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        employees: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        payroll: { view: true, create: true, update: true, delete: true, ownOnly: false },
-        hr: { view: true, create: true, update: true, delete: true, ownOnly: false }
-      });
-      const managerPriv = JSON.stringify({
-        dashboard: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        pos: { view: true, create: true, update: true, delete: false, ownOnly: false },
-        sales: { view: true, create: true, update: true, delete: false, ownOnly: false },
-        inventory: { view: true, create: true, update: true, delete: false, ownOnly: false },
-        expenses: { view: true, create: true, update: true, delete: false, ownOnly: false },
-        laybys: { view: true, create: true, update: true, delete: false, ownOnly: false },
-        customers: { view: true, create: true, update: true, delete: false, ownOnly: false },
-        suppliers: { view: true, create: true, update: true, delete: false, ownOnly: false },
-        reports: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportSales: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportPurchase: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportExpense: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportHr: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        reportCustomer: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        settings: { view: false, create: false, update: false, delete: false, ownOnly: false },
-        purchase: { view: true, create: true, update: true, delete: false, ownOnly: false },
-        employees: { view: true, create: true, update: true, delete: false, ownOnly: false },
-        payroll: { view: true, create: true, update: true, delete: false, ownOnly: false },
-        hr: { view: true, create: true, update: true, delete: false, ownOnly: false }
-      });
-      const salesPriv = JSON.stringify({
-        dashboard: { view: false, create: false, update: false, delete: false, ownOnly: false },
-        pos: { view: true, create: true, update: false, delete: false, ownOnly: true },
-        sales: { view: true, create: false, update: false, delete: false, ownOnly: true },
-        inventory: { view: true, create: false, update: false, delete: false, ownOnly: false },
-        expenses: { view: false, create: false, update: false, delete: false, ownOnly: false },
-        laybys: { view: true, create: true, update: true, delete: false, ownOnly: true },
-        customers: { view: true, create: true, update: true, delete: false, ownOnly: false },
-        suppliers: { view: false, create: false, update: false, delete: false, ownOnly: false },
-        reports: { view: false, create: false, update: false, delete: false, ownOnly: false },
-        settings: { view: false, create: false, update: false, delete: false, ownOnly: false },
-        purchase: { view: false, create: false, update: false, delete: false, ownOnly: false },
-        employees: { view: false, create: false, update: false, delete: false, ownOnly: false },
-        payroll: { view: false, create: false, update: false, delete: false, ownOnly: false },
-        hr: { view: false, create: false, update: false, delete: false, ownOnly: false }
-      });
-
-      const insertRole = sqlite.prepare(
-        `INSERT OR IGNORE INTO roles (id, name, privileges, tenantId) VALUES (?, ?, ?, ?)`
-      );
-      insertRole.run('role-admin', 'Admin', adminPriv, tid);
-      insertRole.run('role-manager', 'Manager', managerPriv, tid);
-      insertRole.run('role-sales', 'Salesperson', salesPriv, tid);
-
-      // Categories
-      const insertCat = sqlite.prepare(`INSERT OR IGNORE INTO categories (id, name, status, tenantId) VALUES (?, ?, ?, ?)`);
-      insertCat.run('cat-1', 'Grade A Jackets', 'Active', tid);
-      insertCat.run('cat-2', 'Denim & Jeans', 'Active', tid);
-      insertCat.run('cat-3', 'Sneakers & Footwear', 'Active', tid);
-      insertCat.run('cat-4', 'Dresses & Skirts', 'Active', tid);
-      insertCat.run('cat-5', 'Accessories', 'Active', tid);
-
-      // Expense Categories
-      const insertExpCat = sqlite.prepare(`INSERT OR IGNORE INTO expense_categories (id, name, status, tenantId) VALUES (?, ?, ?, ?)`);
-      insertExpCat.run('ecat-1', 'Store Rent', 'Active', tid);
-      insertExpCat.run('ecat-2', 'Electricity & Utilities', 'Active', tid);
-      insertExpCat.run('ecat-3', 'Staff Transport', 'Active', tid);
-      insertExpCat.run('ecat-4', 'Packaging & Bags', 'Active', tid);
-
-      // Item Statuses
-      const insertStatus = sqlite.prepare(`INSERT OR IGNORE INTO item_statuses (id, name, status, canSell, tenantId) VALUES (?, ?, ?, ?, ?)`);
-      insertStatus.run('st-1', 'Listed', 'Active', 1, tid);
-      insertStatus.run('st-2', 'Reserved', 'Active', 0, tid);
-      insertStatus.run('st-3', 'Damaged', 'Active', 0, tid);
-      insertStatus.run('st-4', 'Sold', 'Active', 0, tid);
-
-      // Sample Inventory
-      const insertInv = sqlite.prepare(
-        `INSERT OR IGNORE INTO inventory (id, name, category, buyingPrice, price, wholesalePrice, quantity, lowStockAlert, trackInventory, status, sku, size, colour, branchId, tenantId)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      );
-      insertInv.run('inv-1', 'Vintage Leather Bomber Jacket', 'Grade A Jackets', 2200, 4500, 3800, 12, 3, 1, 'Listed', 'JKT-001', 'L', 'Black', branchId, tid);
-      insertInv.run('inv-2', 'Slim Fit Selvedge Denim', 'Denim & Jeans', 1100, 2400, 1950, 25, 5, 1, 'Listed', 'DNM-014', '32', 'Indigo', branchId, tid);
-      insertInv.run('inv-3', 'Retro Street Runner Sneakers', 'Sneakers & Footwear', 1800, 3800, 3200, 8, 3, 1, 'Listed', 'SNK-203', '42', 'White/Green', branchId, tid);
-      insertInv.run('inv-4', 'Pleated Midi Silk Dress', 'Dresses & Skirts', 1500, 3200, 2700, 10, 3, 1, 'Listed', 'DRS-108', 'M', 'Emerald', branchId, tid);
-
-      // Sample Customers
-      const insertCust = sqlite.prepare(
-        `INSERT OR IGNORE INTO customers (id, name, phone, location, eligibility, loyaltyPoints, priceList, tenantId)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      );
-      insertCust.run('cust-walkin', 'Walk-in Customer', '+254 700 000001', 'Nairobi', JSON.stringify(['Paid']), 0, 'retail', tid);
-      insertCust.run('cust-2', 'Grace Njeri', '+254 722 111222', 'Westlands', JSON.stringify(['Paid', 'Credit', 'Layby']), 45, 'retail', tid);
-      insertCust.run('cust-3', 'Kevin Omondi', '+254 733 444555', 'Kilimani', JSON.stringify(['Paid', 'Layby']), 20, 'wholesale', tid);
-
-      // Sample Suppliers
-      const insertSup = sqlite.prepare(
-        `INSERT OR IGNORE INTO suppliers (id, name, phone, email, location, creditTermType, creditDays, tenantId)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      );
-      insertSup.run('sup-1', 'Gikomba Bale Imports Ltd', '+254 720 888999', 'orders@baleimports.co.ke', 'Industrial Area, Nairobi', 'Credit', 30, tid);
-      insertSup.run('sup-2', 'Eastleigh Footwear Wholesale', '+254 711 555666', 'sales@eastleighfootwear.co.ke', 'Eastleigh, Nairobi', 'COD', 0, tid);
-    }
   } catch (err) {
-    console.error('Seed error:', err);
+    console.error('Schema init error:', err);
   }
 }
 
@@ -461,8 +318,9 @@ async function startServer() {
 
       const env = {
         DB: d1Adapter,
-        SUPER_ADMIN_NAME: process.env.SUPER_ADMIN_NAME || 'platform',
-        SUPER_ADMIN_PIN: process.env.SUPER_ADMIN_PIN || '1234',
+        SUPER_ADMIN_NAME: process.env.SUPER_ADMIN_NAME || '',
+        SUPER_ADMIN_PIN: process.env.SUPER_ADMIN_PIN || '',
+        JWT_SECRET: process.env.JWT_SECRET || '',
         ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || ''
       };
 

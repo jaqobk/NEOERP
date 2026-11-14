@@ -1,6 +1,28 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import SearchableSelect from './SearchableSelect';
+const LazySearchableSelect = React.lazy(() => import('./SearchableSelect'));
+const NewBusinessWizardModal = React.lazy(() => import('./components/NewBusinessWizardModal'));
+function SearchableSelect(props) {
+  return (
+    <React.Suspense
+      fallback={
+        <select
+          id={props.id}
+          value={props.value}
+          defaultValue={props.defaultValue}
+          onChange={props.onChange}
+          disabled={props.disabled}
+          required={props.required}
+          className={props.className}
+        >
+          {props.children}
+        </select>
+      }
+    >
+      <LazySearchableSelect {...props} />
+    </React.Suspense>
+  );
+}
 import { 
   BarChart3, ShoppingBag, ArrowUpRight, DollarSign, Package, 
   Settings, ShieldAlert, Plus, Trash2, Edit, CheckCircle, 
@@ -55,11 +77,26 @@ export default function App() {
   const [auditBranchFilter, setAuditBranchFilter] = useState('');
   const [ledgerBranchId, setLedgerBranchId] = useState('');
   const [appHydrating, setAppHydrating] = useState(false);
-  const [sessionExpiredModalOpen, setSessionExpiredModalOpen] = useState(false);
-  const [sessionReauthUser, setSessionReauthUser] = useState('');
-  const [sessionReauthPin, setSessionReauthPin] = useState('');
-  const [sessionReauthBusy, setSessionReauthBusy] = useState(false);
-  const [sessionReauthError, setSessionReauthError] = useState('');
+  const [needsBusinessWizard, setNeedsBusinessWizard] = useState(false);
+  const logoutInFlightRef = useRef(false);
+  const submitLocksRef = useRef({});
+  const [busyActions, setBusyActions] = useState({});
+  const isBusy = (key) => !!busyActions[key];
+  const runWithLock = async (key, fn) => {
+    if (submitLocksRef.current[key]) return undefined;
+    submitLocksRef.current[key] = true;
+    setBusyActions(prev => ({ ...prev, [key]: true }));
+    try {
+      return await fn();
+    } finally {
+      submitLocksRef.current[key] = false;
+      setBusyActions(prev => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }
+  };
   const posCheckoutLockRef = useRef(false);
   const posCheckoutIdemKeyRef = useRef('');
   const [posCheckoutBusy, setPosCheckoutBusy] = useState(false);
@@ -93,6 +130,7 @@ export default function App() {
   const handleLogout = (reason) => {
     setIsLoggedIn(false);
     setAuthMode('login');
+    setNeedsBusinessWizard(false);
     if (reason && typeof reason === 'string') {
       setSessionNotice(reason);
     } else {
@@ -140,10 +178,10 @@ export default function App() {
     }
     return fetch(url, { ...options, headers }).then(async (res) => {
       if (res.status === 401 && token && !url.includes('/api/login') && !url.includes('/api/super-login') && !url.includes('/api/signup') && !url.includes('/api/logout')) {
-        setSessionReauthUser(prev => prev || currentUser?.name || superProfile?.username || '');
-        setSessionReauthPin('');
-        setSessionReauthError('Session expired — sign in again to continue without losing your work.');
-        setSessionExpiredModalOpen(true);
+        if (!logoutInFlightRef.current) {
+          logoutInFlightRef.current = true;
+          handleLogout('Your session expired. Please sign in again.');
+        }
       }
       return res;
     });
@@ -562,11 +600,7 @@ export default function App() {
     }}
   ]);
 
-  const [users, setUsers] = useState([
-    { id: 'u1', name: 'Main Admin', role: 'Admin', pin: '1234', phone: '+254 700 000000', status: 'Active' },
-    { id: 'u2', name: 'Alice Wambui', role: 'Salesperson', pin: '5678', phone: '+254 711 222333', status: 'Active' },
-    { id: 'u3', name: 'Benta Akinyi', role: 'Manager', pin: '0000', phone: '+254 733 999888', status: 'Inactive' }
-  ]);
+  const [users, setUsers] = useState([]);
 
   // POS State with Split Payment, Sale Type Selection, Custom Sale Date, Category Filter, and POS Search Bar
   const [posCart, setPosCart] = useState([]);
@@ -940,6 +974,11 @@ export default function App() {
               }
             } catch (e) {}
           }
+          if (data.needsBusinessWizard && ((currentUser?.role || '').toLowerCase() === 'admin' || isAdminRole) && !tenantInfo?.isSuperAdmin) {
+            setNeedsBusinessWizard(true);
+          } else if (data.tenantSettings && Number(data.tenantSettings.wizardCompleted) === 1) {
+            setNeedsBusinessWizard(false);
+          }
 
           // One-time push of localStorage-only data into DB (idempotent per browser)
           try {
@@ -1076,147 +1115,155 @@ export default function App() {
   const handleCreateNewSupplier = async (e) => {
     e.preventDefault();
     if (!newSupplierForm.name) return;
-    const dup = (suppliers || []).find(s => (s.name || '').trim().toLowerCase() === (newSupplierForm.name || '').trim().toLowerCase());
-    if (dup && !window.confirm(`A supplier named "${dup.name}" already exists. Create another with the same name?`)) return;
-    const supObj = {
-      id: `sup-${Date.now()}`,
-      createdBy: currentUser?.name || currentUser?.id || '',
-      ...newSupplierForm,
-      branchId: newSupplierForm.allLocations ? '' : (newSupplierForm.branchId || activeBranchId || undefined),
-      allLocations: !!newSupplierForm.allLocations
-    };
-    try {
-      const response = await apiFetch('/api/suppliers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(supObj)
-      });
-      if (response.ok) {
-        setSuppliers([...suppliers, supObj]);
-        setNewSupplierForm({ name: '', phone: '', email: '', location: '', creditTermType: 'COD', creditDays: 0, branchId: '', allLocations: true });
-        setNewSupplierModalOpen(false);
-      } else {
-        alert('Failed to create new supplier in database.');
+    await runWithLock('sup_create', async () => {
+      const dup = (suppliers || []).find(s => (s.name || '').trim().toLowerCase() === (newSupplierForm.name || '').trim().toLowerCase());
+      if (dup && !window.confirm(`A supplier named "${dup.name}" already exists. Create another with the same name?`)) return;
+      const supObj = {
+        id: `sup-${Date.now()}`,
+        createdBy: currentUser?.name || currentUser?.id || '',
+        ...newSupplierForm,
+        branchId: newSupplierForm.allLocations ? '' : (newSupplierForm.branchId || activeBranchId || undefined),
+        allLocations: !!newSupplierForm.allLocations
+      };
+      try {
+        const response = await apiFetch('/api/suppliers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(supObj)
+        });
+        if (response.ok) {
+          setSuppliers([...suppliers, supObj]);
+          setNewSupplierForm({ name: '', phone: '', email: '', location: '', creditTermType: 'COD', creditDays: 0, branchId: '', allLocations: true });
+          setNewSupplierModalOpen(false);
+        } else {
+          alert('Failed to create new supplier in database.');
+        }
+      } catch (err) {
+        console.error('Error saving supplier:', err);
       }
-    } catch (err) {
-      console.error('Error saving supplier:', err);
-    }
+    });
   };
 
   const handleSaveInventory = async (itemToSave) => {
-    try {
-      const vv = parseItemVarianceValues(itemToSave);
-      let normalized = applyVarianceValuesToItem(itemToSave, vv);
-      const allowedBrs = parseAllowedBranches(normalized).map(String).filter(Boolean);
-      const mode = normalized.locationMode || (isItemInAllLocations(normalized) ? 'all' : (allowedBrs.length > 0 ? 'multi' : 'single'));
-      const isAllLoc = mode === 'all';
-      const tracked = isTrackedInventory(normalized);
-      const rawLq = parseLocationQuantities(normalized);
-      const cleanLq = {};
-      if (mode === 'all') {
-        const pool = (accessibleBranches && accessibleBranches.length ? accessibleBranches : (branches || []));
-        pool.forEach(b => {
-          cleanLq[b.id] = tracked ? Math.max(0, Number(rawLq[b.id]) || 0) : 999;
-        });
-        Object.keys(rawLq).forEach(k => {
-          if (cleanLq[k] === undefined) cleanLq[k] = tracked ? Math.max(0, Number(rawLq[k]) || 0) : 999;
-        });
-      } else if (mode === 'multi') {
-        if (allowedBrs.length === 0) {
-          alert('Please select at least one location or choose "All locations".');
-          return;
+    await runWithLock('inv_save', async () => {
+      try {
+        const vv = parseItemVarianceValues(itemToSave);
+        let normalized = applyVarianceValuesToItem(itemToSave, vv);
+        const allowedBrs = parseAllowedBranches(normalized).map(String).filter(Boolean);
+        const mode = normalized.locationMode || (isItemInAllLocations(normalized) ? 'all' : (allowedBrs.length > 0 ? 'multi' : 'single'));
+        const isAllLoc = mode === 'all';
+        const tracked = isTrackedInventory(normalized);
+        const rawLq = parseLocationQuantities(normalized);
+        const cleanLq = {};
+        if (mode === 'all') {
+          const pool = (accessibleBranches && accessibleBranches.length ? accessibleBranches : (branches || []));
+          pool.forEach(b => {
+            cleanLq[b.id] = tracked ? Math.max(0, Number(rawLq[b.id]) || 0) : 999;
+          });
+          Object.keys(rawLq).forEach(k => {
+            if (cleanLq[k] === undefined) cleanLq[k] = tracked ? Math.max(0, Number(rawLq[k]) || 0) : 999;
+          });
+        } else if (mode === 'multi') {
+          if (allowedBrs.length === 0) {
+            alert('Please select at least one location or choose "All locations".');
+            return;
+          }
+          allowedBrs.forEach(bid => {
+            cleanLq[bid] = tracked ? Math.max(0, Number(rawLq[bid]) || 0) : 999;
+          });
         }
-        allowedBrs.forEach(bid => {
-          cleanLq[bid] = tracked ? Math.max(0, Number(rawLq[bid]) || 0) : 999;
+        const totalQty = (mode === 'all' || mode === 'multi')
+          ? (tracked ? Object.values(cleanLq).reduce((s, v) => s + (Number(v) || 0), 0) : 999)
+          : (tracked ? Math.max(0, parseInt(normalized.quantity, 10) || 0) : 999);
+        normalized = {
+          ...normalized,
+          allLocations: isAllLoc,
+          allowedBranches: mode === 'multi' ? allowedBrs : [],
+          locationQuantities: cleanLq,
+          branchId: (mode === 'all' || mode === 'multi') ? '' : (normalized.branchId || activeBranchId || ''),
+          quantity: totalQty,
+          locationMode: mode
+        };
+        const prev = inventory.find(i => i.id === normalized.id);
+        setInventory(inventory.map(i => i.id === normalized.id ? normalized : i));
+        setSelectedInventoryItem(null);
+        logAudit('update', 'inventory', normalized.name || normalized.id);
+        if (prev && prev.quantity !== normalized.quantity) logStock(normalized.id, normalized.name, (normalized.quantity||0) - (prev.quantity||0), 'Stock adjust', normalized.id);
+        const response = await apiFetch(`/api/inventory/${normalized.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(normalized)
         });
+        if (!response.ok) {
+          if (prev) setInventory(inventory.map(i => i.id === normalized.id ? prev : i));
+          alert('Failed to update inventory item in database.');
+        }
+      } catch (err) {
+        console.error('Error saving inventory:', err);
       }
-      const totalQty = (mode === 'all' || mode === 'multi')
-        ? (tracked ? Object.values(cleanLq).reduce((s, v) => s + (Number(v) || 0), 0) : 999)
-        : (tracked ? Math.max(0, parseInt(normalized.quantity, 10) || 0) : 999);
-      normalized = {
-        ...normalized,
-        allLocations: isAllLoc,
-        allowedBranches: mode === 'multi' ? allowedBrs : [],
-        locationQuantities: cleanLq,
-        branchId: (mode === 'all' || mode === 'multi') ? '' : (normalized.branchId || activeBranchId || ''),
-        quantity: totalQty,
-        locationMode: mode
-      };
-      const prev = inventory.find(i => i.id === normalized.id);
-      // Optimistic local update so Save feels instant
-      setInventory(inventory.map(i => i.id === normalized.id ? normalized : i));
-      setSelectedInventoryItem(null);
-      logAudit('update', 'inventory', normalized.name || normalized.id);
-      if (prev && prev.quantity !== normalized.quantity) logStock(normalized.id, normalized.name, (normalized.quantity||0) - (prev.quantity||0), 'Stock adjust', normalized.id);
-      const response = await apiFetch(`/api/inventory/${normalized.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(normalized)
-      });
-      if (!response.ok) {
-        if (prev) setInventory(inventory.map(i => i.id === normalized.id ? prev : i));
-        alert('Failed to update inventory item in database.');
-      }
-    } catch (err) {
-      console.error('Error saving inventory:', err);
-    }
+    });
   };
 
   const handleDeleteInventory = async (itemId) => {
-    if (!window.confirm('Are you sure you want to delete this item?')) return;
-    try {
-      const response = await apiFetch(`/api/inventory/${itemId}`, { method: 'DELETE' });
-      if (response.ok) {
-        setInventory(inventory.filter(i => i.id !== itemId));
-        // Remove related stock movement history for this item
-        const nextMv = (stockMovements || []).filter(m => m.itemId !== itemId && m.ref !== itemId);
-        if (typeof saveStockMovements === 'function') saveStockMovements(nextMv);
-        else setStockMovements(nextMv);
-        apiFetch('/api/stock-movements', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ itemId }) }).catch(() => {});
-        logAudit('delete', 'inventory', itemId);
-        setSelectedInventoryItem(null);
-      } else {
-        alert('Failed to delete inventory item.');
+    await runWithLock('inv_del', async () => {
+      if (!window.confirm('Are you sure you want to delete this item?')) return;
+      try {
+        const response = await apiFetch(`/api/inventory/${itemId}`, { method: 'DELETE' });
+        if (response.ok) {
+          setInventory(inventory.filter(i => i.id !== itemId));
+          const nextMv = (stockMovements || []).filter(m => m.itemId !== itemId && m.ref !== itemId);
+          if (typeof saveStockMovements === 'function') saveStockMovements(nextMv);
+          else setStockMovements(nextMv);
+          apiFetch('/api/stock-movements', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ itemId }) }).catch(() => {});
+          logAudit('delete', 'inventory', itemId);
+          setSelectedInventoryItem(null);
+        } else {
+          alert('Failed to delete inventory item.');
+        }
+      } catch (err) {
+        console.error('Error deleting inventory:', err);
       }
-    } catch (err) {
-      console.error('Error deleting inventory:', err);
-    }
+    });
   };
 
   const handleSaveCustomer = async (customerToSave) => {
-    try {
-      const prev = customers.find(x => x.id === customerToSave.id);
-      setCustomers(customers.map(x => x.id === customerToSave.id ? customerToSave : x));
-      setSelectedCustomer(null);
-      logAudit('update', 'customer', customerToSave.name || customerToSave.id);
-      const response = await apiFetch(`/api/customers/${customerToSave.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(customerToSave)
-      });
-      if (!response.ok) {
-        if (prev) setCustomers(customers.map(x => x.id === customerToSave.id ? prev : x));
-        alert('Failed to update customer in database.');
+    await runWithLock('cust_save', async () => {
+      try {
+        const prev = customers.find(x => x.id === customerToSave.id);
+        setCustomers(customers.map(x => x.id === customerToSave.id ? customerToSave : x));
+        setSelectedCustomer(null);
+        logAudit('update', 'customer', customerToSave.name || customerToSave.id);
+        const response = await apiFetch(`/api/customers/${customerToSave.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(customerToSave)
+        });
+        if (!response.ok) {
+          if (prev) setCustomers(customers.map(x => x.id === customerToSave.id ? prev : x));
+          alert('Failed to update customer in database.');
+        }
+      } catch (err) {
+        console.error('Error saving customer:', err);
       }
-    } catch (err) {
-      console.error('Error saving customer:', err);
-    }
+    });
   };
 
   const handleDeleteCustomer = async (customerId) => {
-    if (!window.confirm('Are you sure you want to delete this customer?')) return;
-    try {
-      const response = await apiFetch(`/api/customers/${customerId}`, { method: 'DELETE' });
-      if (response.ok) {
-        setCustomers(customers.filter(c => c.id !== customerId));
-        logAudit('delete', 'customer', customerId);
-        setSelectedCustomer(null);
-      } else {
-        alert('Failed to delete customer.');
+    await runWithLock('cust_del', async () => {
+      if (!window.confirm('Are you sure you want to delete this customer?')) return;
+      try {
+        const response = await apiFetch(`/api/customers/${customerId}`, { method: 'DELETE' });
+        if (response.ok) {
+          setCustomers(customers.filter(c => c.id !== customerId));
+          logAudit('delete', 'customer', customerId);
+          setSelectedCustomer(null);
+        } else {
+          alert('Failed to delete customer.');
+        }
+      } catch (err) {
+        console.error('Error deleting customer:', err);
       }
-    } catch (err) {
-      console.error('Error deleting customer:', err);
-    }
+    });
   };
 
   const persistExpenses = (list) => {
@@ -1241,387 +1288,423 @@ export default function App() {
   };
 
   const handleSaveExpense = async (expenseToSave) => {
-    const prevExp = (expenses || []).find(e => e.id === expenseToSave.id);
-    const prevPaid = prevExp ? (parseFloat(prevExp.paidAmount ?? prevExp.amount) || 0) : 0;
-    const normalized = normalizeExpense(expenseToSave);
-    let hist = normalized.paymentHistory ?? prevExp?.paymentHistory;
-    try { if (typeof hist === 'string') hist = JSON.parse(hist || '[]'); } catch (_) { hist = []; }
-    if (!Array.isArray(hist)) hist = [];
-    if (prevExp && hist.length === 0 && prevPaid > 0) {
-      hist = [{
-        id: `exppay-init-${normalized.id}`,
-        date: prevExp.date || normalized.date,
-        amount: prevPaid,
-        paymentMethod: prevExp.paymentMethod || 'Cash',
-        mpesaCode: prevExp.mpesaCode || ''
-      }];
-    }
-    const deltaPaid = Math.round(((parseFloat(normalized.paidAmount) || 0) - prevPaid) * 100) / 100;
-    if (deltaPaid > 0) {
-      hist = [
-        ...hist,
-        {
-          id: `exppay-${Date.now()}`,
-          date: new Date().toISOString(),
-          amount: deltaPaid,
-          paymentMethod: normalized.paymentMethod || 'Cash',
-          mpesaCode: String(normalized.paymentMethod || '').toLowerCase().includes('m-pesa') ? (normalized.mpesaCode || '') : ''
-        }
-      ];
-      logAudit('payment', 'expense', `${normalized.id} · ${shopProfile.currency} ${deltaPaid} via ${normalized.paymentMethod || 'Cash'} (${normalized.description || normalized.category || ''})`);
-    }
-    normalized.paymentHistory = hist;
-    const exists = (expenses || []).some(e => e.id === normalized.id);
-    const nextList = exists
-      ? expenses.map(e => e.id === normalized.id ? normalized : e)
-      : [normalized, ...(expenses || [])];
-    persistExpenses(nextList);
-    setSelectedExpenseItem(null);
-    try {
-      const res = await apiFetch(`/api/expenses/${normalized.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(normalized)
-      });
-      if (!res.ok) {
-        await apiFetch('/api/expenses', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(normalized)
-        });
+    await runWithLock('exp_save', async () => {
+      const prevExp = (expenses || []).find(e => e.id === expenseToSave.id);
+      const prevPaid = prevExp ? (parseFloat(prevExp.paidAmount ?? prevExp.amount) || 0) : 0;
+      const normalized = normalizeExpense(expenseToSave);
+      let hist = normalized.paymentHistory ?? prevExp?.paymentHistory;
+      try { if (typeof hist === 'string') hist = JSON.parse(hist || '[]'); } catch (_) { hist = []; }
+      if (!Array.isArray(hist)) hist = [];
+      if (prevExp && hist.length === 0 && prevPaid > 0) {
+        hist = [{
+          id: `exppay-init-${normalized.id}`,
+          date: prevExp.date || normalized.date,
+          amount: prevPaid,
+          paymentMethod: prevExp.paymentMethod || 'Cash',
+          mpesaCode: prevExp.mpesaCode || ''
+        }];
       }
-    } catch (err) {
+      const deltaPaid = Math.round(((parseFloat(normalized.paidAmount) || 0) - prevPaid) * 100) / 100;
+      if (deltaPaid > 0) {
+        hist = [
+          ...hist,
+          {
+            id: `exppay-${Date.now()}`,
+            date: new Date().toISOString(),
+            amount: deltaPaid,
+            paymentMethod: normalized.paymentMethod || 'Cash',
+            mpesaCode: String(normalized.paymentMethod || '').toLowerCase().includes('m-pesa') ? (normalized.mpesaCode || '') : ''
+          }
+        ];
+        logAudit('payment', 'expense', `${normalized.id} · ${shopProfile.currency} ${deltaPaid} via ${normalized.paymentMethod || 'Cash'} (${normalized.description || normalized.category || ''})`);
+      }
+      normalized.paymentHistory = hist;
+      const exists = (expenses || []).some(e => e.id === normalized.id);
+      const nextList = exists
+        ? expenses.map(e => e.id === normalized.id ? normalized : e)
+        : [normalized, ...(expenses || [])];
+      persistExpenses(nextList);
+      setSelectedExpenseItem(null);
       try {
-        await apiFetch('/api/expenses', {
-          method: 'POST',
+        const res = await apiFetch(`/api/expenses/${normalized.id}`, {
+          method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(normalized)
         });
-      } catch (err2) {
-        console.warn('Expense saved locally', err2);
+        if (!res.ok) {
+          await apiFetch('/api/expenses', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(normalized)
+          });
+        }
+      } catch (err) {
+        try {
+          await apiFetch('/api/expenses', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(normalized)
+          });
+        } catch (err2) {
+          console.warn('Expense saved locally', err2);
+        }
       }
-    }
+    });
   };
 
   const handleDeleteExpense = async (expenseId) => {
-    if (!window.confirm('Are you sure you want to delete this expense?')) return;
-    const target = (expenses || []).find(e => e.id === expenseId);
-    persistExpenses(expenses.filter(e => e.id !== expenseId));
-    setSelectedExpenseItem(null);
-    logAudit('delete', 'expense', `${expenseId}${target?.description ? ' (' + target.description + ')' : ''}`);
-    try {
-      await apiFetch(`/api/expenses/${expenseId}`, { method: 'DELETE' });
-    } catch (err) {
-      console.warn('Expense deleted locally', err);
-    }
+    await runWithLock('exp_del', async () => {
+      if (!window.confirm('Are you sure you want to delete this expense?')) return;
+      const target = (expenses || []).find(e => e.id === expenseId);
+      persistExpenses(expenses.filter(e => e.id !== expenseId));
+      setSelectedExpenseItem(null);
+      logAudit('delete', 'expense', `${expenseId}${target?.description ? ' (' + target.description + ')' : ''}`);
+      try {
+        await apiFetch(`/api/expenses/${expenseId}`, { method: 'DELETE' });
+      } catch (err) {
+        console.warn('Expense deleted locally', err);
+      }
+    });
   };
 
   const handleDeleteSale = async (saleId) => {
-    if (!window.confirm('Are you sure you want to void/delete this transaction?')) return;
-    try {
-      const response = await apiFetch(`/api/sales/${saleId}`, { method: 'DELETE' });
-      if (response.ok) {
-        setSales(sales.filter(s => s.id !== saleId));
-        setSelectedSaleItem(null);
-        logAudit('delete', 'sale', saleId);
-      } else {
-        alert('Failed to delete transaction record.');
+    await runWithLock('sale_del', async () => {
+      if (!window.confirm('Are you sure you want to void/delete this transaction?')) return;
+      try {
+        const response = await apiFetch(`/api/sales/${saleId}`, { method: 'DELETE' });
+        if (response.ok) {
+          setSales(sales.filter(s => s.id !== saleId));
+          setSelectedSaleItem(null);
+          logAudit('delete', 'sale', saleId);
+        } else {
+          alert('Failed to delete transaction record.');
+        }
+      } catch (err) {
+        console.error('Error deleting sale:', err);
       }
-    } catch (err) {
-      console.error('Error deleting sale:', err);
-    }
+    });
   };
 
   // --- SETTINGS DATABASE SYNC HANDLERS ---
   const handleSaveShopProfile = async () => {
-    try {
-      const payload = { ...shopProfile, creditPolicy };
-      const response = await apiFetch('/api/shop-profile', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json().catch(() => ({}));
-      if (response.ok) {
-        if (data.profile) {
-          setShopProfile(prev => ({ ...prev, ...data.profile }));
-          if (data.profile.creditPolicy) setCreditPolicy(data.profile.creditPolicy);
+    await runWithLock('shop_profile', async () => {
+      try {
+        const payload = { ...shopProfile, creditPolicy };
+        const response = await apiFetch('/api/shop-profile', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok) {
+          if (data.profile) {
+            setShopProfile(prev => ({ ...prev, ...data.profile }));
+            if (data.profile.creditPolicy) setCreditPolicy(data.profile.creditPolicy);
+          }
+          if (shopProfile.name) {
+            setTenantInfo(prev => {
+              const next = prev ? { ...prev, name: shopProfile.name } : { id: 'tenant-default', name: shopProfile.name };
+              try { localStorage.setItem('erp_tenant', JSON.stringify(next)); } catch (e) {}
+              return next;
+            });
+          }
+          try {
+            const tid = (tenantInfo && tenantInfo.id) || 'tenant-default';
+            localStorage.setItem('erp_shop_profile__' + tid, JSON.stringify(payload));
+          } catch (_) {}
+          saveTenantSettingsPartial({ creditPolicy });
+          logAudit('update', 'business_profile', `Updated business profile: ${shopProfile.name || 'Shop'}`);
+          alert('Business profile updated and saved to database successfully!');
+        } else {
+          alert(data.error || 'Failed to update business profile in database.');
         }
-        if (shopProfile.name) {
-          setTenantInfo(prev => {
-            const next = prev ? { ...prev, name: shopProfile.name } : { id: 'tenant-default', name: shopProfile.name };
-            try { localStorage.setItem('erp_tenant', JSON.stringify(next)); } catch (e) {}
-            return next;
-          });
-        }
-        try {
-          const tid = (tenantInfo && tenantInfo.id) || 'tenant-default';
-          localStorage.setItem('erp_shop_profile__' + tid, JSON.stringify(payload));
-        } catch (_) {}
-        saveTenantSettingsPartial({ creditPolicy });
-        logAudit('update', 'business_profile', `Updated business profile: ${shopProfile.name || 'Shop'}`);
-        alert('Business profile updated and saved to database successfully!');
-      } else {
-        alert(data.error || 'Failed to update business profile in database.');
+      } catch (err) {
+        console.error('Error saving shop profile:', err);
+        alert('Network error: Failed to update business profile in database.');
       }
-    } catch (err) {
-      console.error('Error saving shop profile:', err);
-      alert('Network error: Failed to update business profile in database.');
-    }
+    });
   };
 
   const handleSaveUser = async (userToSave) => {
-    try {
-      const response = await apiFetch(`/api/users/${userToSave.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(userToSave)
-      });
-      if (response.ok) {
-        const { pin, ...safeUser } = userToSave;
-        setUsers(users.map(u => u.id === userToSave.id ? { ...u, ...safeUser, pin: undefined } : u));
-        setSelectedUser(null);
-      } else {
-        alert('Failed to update user.');
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('user_save', async () => {
+      try {
+        const response = await apiFetch(`/api/users/${userToSave.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(userToSave)
+        });
+        if (response.ok) {
+          const { pin, ...safeUser } = userToSave;
+          setUsers(users.map(u => u.id === userToSave.id ? { ...u, ...safeUser, pin: undefined } : u));
+          setSelectedUser(null);
+        } else {
+          alert('Failed to update user.');
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleCreateNewUser = async (e) => {
     e.preventDefault();
     if (!newUserForm.name || !newUserForm.pin) return;
-    const userObj = {
-      id: `u-${Date.now()}`,
-      ...newUserForm
-    };
-    try {
-      const response = await apiFetch('/api/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(userObj)
-      });
-      if (response.ok) {
-        const { pin, ...safeUser } = userObj;
-        setUsers([...users, safeUser]);
-        setNewUserForm({ name: '', role: 'Salesperson', pin: '', phone: '', status: 'Active', allowedBranches: [] });
-        setAddUserModalOpen(false);
-      } else {
-        alert('Failed to create new user in database.');
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('user_create', async () => {
+      const userObj = {
+        id: `u-${Date.now()}`,
+        ...newUserForm
+      };
+      try {
+        const response = await apiFetch('/api/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(userObj)
+        });
+        if (response.ok) {
+          const { pin, ...safeUser } = userObj;
+          setUsers([...users, safeUser]);
+          setNewUserForm({ name: '', role: 'Salesperson', pin: '', phone: '', status: 'Active', allowedBranches: [] });
+          setAddUserModalOpen(false);
+        } else {
+          alert('Failed to create new user in database.');
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleDeleteUser = async (userId) => {
-    if (!window.confirm('Delete this user?')) return;
-    try {
-      const response = await apiFetch(`/api/users/${userId}`, { method: 'DELETE' });
-      if (response.ok) {
-        setUsers(users.filter(u => u.id !== userId));
-        setSelectedUser(null);
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('user_del', async () => {
+      if (!window.confirm('Delete this user?')) return;
+      try {
+        const response = await apiFetch(`/api/users/${userId}`, { method: 'DELETE' });
+        if (response.ok) {
+          setUsers(users.filter(u => u.id !== userId));
+          setSelectedUser(null);
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleCreateNewRole = async (e) => {
     e.preventDefault();
     if (!newRoleForm.name) return;
-    const roleObj = {
-      id: `role-${Date.now()}`,
-      name: newRoleForm.name,
-      privileges: {
-        dashboard: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        pos: {view:true, create:true, update:false, delete:false, ownOnly:true},
-        sales: {view:true, create:false, update:false, delete:false, ownOnly:true},
-        inventory: {view:true, create:false, update:false, delete:false, ownOnly:false},
-        expenses: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        laybys: {view:true, create:true, update:false, delete:false, ownOnly:true},
-        customers: {view:true, create:true, update:false, delete:false, ownOnly:false},
-        suppliers: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        reports: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        reportSales: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        reportPurchase: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        reportExpense: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        reportHr: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        reportCustomer: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        settings: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        purchase: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        employees: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        payroll: {view:false, create:false, update:false, delete:false, ownOnly:false},
-        hr: {view:false, create:false, update:false, delete:false, ownOnly:false}
-      }
-    };
-    try {
-      const response = await apiFetch('/api/roles', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(roleObj)
-      });
-      if (response.ok) {
-        setRoles([...roles, roleObj]);
-        setNewRoleForm({ name: '' });
-        setAddRoleModalOpen(false);
-      } else {
-        alert('Failed to create new role.');
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('role_create', async () => {
+      const roleObj = {
+        id: `role-${Date.now()}`,
+        name: newRoleForm.name,
+        privileges: {
+          dashboard: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          pos: {view:true, create:true, update:false, delete:false, ownOnly:true},
+          sales: {view:true, create:false, update:false, delete:false, ownOnly:true},
+          inventory: {view:true, create:false, update:false, delete:false, ownOnly:false},
+          expenses: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          laybys: {view:true, create:true, update:false, delete:false, ownOnly:true},
+          customers: {view:true, create:true, update:false, delete:false, ownOnly:false},
+          suppliers: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          reports: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          reportSales: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          reportPurchase: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          reportExpense: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          reportHr: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          reportCustomer: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          settings: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          purchase: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          employees: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          payroll: {view:false, create:false, update:false, delete:false, ownOnly:false},
+          hr: {view:false, create:false, update:false, delete:false, ownOnly:false}
+        }
+      };
+      try {
+        const response = await apiFetch('/api/roles', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(roleObj)
+        });
+        if (response.ok) {
+          setRoles([...roles, roleObj]);
+          setNewRoleForm({ name: '' });
+          setAddRoleModalOpen(false);
+        } else {
+          alert('Failed to create new role.');
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleSaveRole = async (roleToSave) => {
-    try {
-      const allKeys = ['dashboard','pos','sales','inventory','expenses','laybys','customers','suppliers','reports','reportComprehensive','reportSales','reportPurchase','reportExpense','reportHr','reportCustomer','reportSalesMostItems','reportSalesMostCategories','reportSalesDormant','reportSalesBestPeople','reportSalesKpis','reportSalesPeople','reportSalesCreditsLayby','reportSalesTax','reportPurchaseSummary','reportPurchaseByCategory','reportPurchaseCogs','reportPurchaseUnpaid','reportPurchaseTax','reportExpenseHighCategories','reportExpenseFrequent','reportExpenseUnpaid','reportExpenseTax','reportHrSummary','reportHrLeaveSalary','reportCustomerStatement','reportInventory','reportAging','reportFinancial','reportLedger','settings','purchase','employees','payroll','hr'];
-      const mergedPrivs = {};
-      allKeys.forEach(k => {
-        const p = roleToSave.privileges?.[k];
-        mergedPrivs[k] = p && typeof p === 'object'
-          ? { view: !!p.view, create: !!p.create, update: !!p.update, delete: !!p.delete, ownOnly: p.ownOnly === true }
-          : { view: false, create: false, update: false, delete: false, ownOnly: false };
-      });
-      const payload = { ...roleToSave, privileges: mergedPrivs };
-      const response = await apiFetch(`/api/roles/${roleToSave.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      if (response.ok) {
-        setRoles(roles.map(r => r.id === roleToSave.id ? payload : r));
-        setSelectedRole(null);
-        alert('Role privileges saved. User must log in again to apply changes.');
-      } else {
-        alert('Failed to update role privileges.');
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('role_save', async () => {
+      try {
+        const allKeys = ['dashboard','pos','sales','inventory','expenses','laybys','customers','suppliers','reports','reportComprehensive','reportSales','reportPurchase','reportExpense','reportHr','reportCustomer','reportSalesMostItems','reportSalesMostCategories','reportSalesDormant','reportSalesBestPeople','reportSalesKpis','reportSalesPeople','reportSalesCreditsLayby','reportSalesTax','reportPurchaseSummary','reportPurchaseByCategory','reportPurchaseCogs','reportPurchaseUnpaid','reportPurchaseTax','reportExpenseHighCategories','reportExpenseFrequent','reportExpenseUnpaid','reportExpenseTax','reportHrSummary','reportHrLeaveSalary','reportCustomerStatement','reportInventory','reportAging','reportFinancial','reportLedger','settings','purchase','employees','payroll','hr'];
+        const mergedPrivs = {};
+        allKeys.forEach(k => {
+          const p = roleToSave.privileges?.[k];
+          mergedPrivs[k] = p && typeof p === 'object'
+            ? { view: !!p.view, create: !!p.create, update: !!p.update, delete: !!p.delete, ownOnly: p.ownOnly === true }
+            : { view: false, create: false, update: false, delete: false, ownOnly: false };
+        });
+        const payload = { ...roleToSave, privileges: mergedPrivs };
+        const response = await apiFetch(`/api/roles/${roleToSave.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (response.ok) {
+          setRoles(roles.map(r => r.id === roleToSave.id ? payload : r));
+          setSelectedRole(null);
+          alert('Role privileges saved. User must log in again to apply changes.');
+        } else {
+          alert('Failed to update role privileges.');
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleDeleteRole = async (roleId) => {
-    if (!window.confirm('Are you sure you want to delete this role?')) return;
-    try {
-      const response = await apiFetch(`/api/roles/${roleId}`, { method: 'DELETE' });
-      if (response.ok) {
-        setRoles(roles.filter(r => r.id !== roleId));
-        setSelectedRole(null);
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('role_del', async () => {
+      if (!window.confirm('Are you sure you want to delete this role?')) return;
+      try {
+        const response = await apiFetch(`/api/roles/${roleId}`, { method: 'DELETE' });
+        if (response.ok) {
+          setRoles(roles.filter(r => r.id !== roleId));
+          setSelectedRole(null);
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleCreateNewCategory = async (e) => {
     e.preventDefault();
     if (!newCategoryForm.name) return;
-    const catObj = {
-      id: `cat-${Date.now()}`,
-      ...newCategoryForm
-    };
-    try {
-      const response = await apiFetch('/api/categories', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(catObj)
-      });
-      if (response.ok) {
-        setCategories([...categories, catObj]);
-        setNewCategoryForm({ name: '', status: 'Active' });
-        setAddCategoryModalOpen(false);
-      } else {
-        alert('Failed to create new category.');
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('cat_create', async () => {
+      const catObj = {
+        id: `cat-${Date.now()}`,
+        ...newCategoryForm
+      };
+      try {
+        const response = await apiFetch('/api/categories', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(catObj)
+        });
+        if (response.ok) {
+          setCategories([...categories, catObj]);
+          setNewCategoryForm({ name: '', status: 'Active' });
+          setAddCategoryModalOpen(false);
+        } else {
+          alert('Failed to create new category.');
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleSaveCategory = async (catToSave) => {
-    try {
-      const response = await apiFetch(`/api/categories/${catToSave.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(catToSave)
-      });
-      if (response.ok) {
-        setCategories(categories.map(c => c.id === catToSave.id ? catToSave : c));
-        setSelectedCategory(null);
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('cat_save', async () => {
+      try {
+        const response = await apiFetch(`/api/categories/${catToSave.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(catToSave)
+        });
+        if (response.ok) {
+          setCategories(categories.map(c => c.id === catToSave.id ? catToSave : c));
+          setSelectedCategory(null);
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleDeleteCategory = async (catId) => {
-    if (!window.confirm('Are you sure you want to delete this category?')) return;
-    try {
-      const response = await apiFetch(`/api/categories/${catId}`, { method: 'DELETE' });
-      if (response.ok) {
-        setCategories(categories.filter(c => c.id !== catId));
-        setSelectedCategory(null);
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('cat_del', async () => {
+      if (!window.confirm('Are you sure you want to delete this category?')) return;
+      try {
+        const response = await apiFetch(`/api/categories/${catId}`, { method: 'DELETE' });
+        if (response.ok) {
+          setCategories(categories.filter(c => c.id !== catId));
+          setSelectedCategory(null);
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleCreateNewStatus = async (e) => {
     e.preventDefault();
     if (!newStatusForm.name) return;
-    const stObj = {
-      id: `st-${Date.now()}`,
-      ...newStatusForm
-    };
-    try {
-      const response = await apiFetch('/api/item-statuses', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(stObj)
-      });
-      if (response.ok) {
-        setItemStatuses([...itemStatuses, stObj]);
-        setNewStatusForm({ name: '', canSell: true, status: 'Active' });
-        setAddStatusModalOpen(false);
-      } else {
-        alert('Failed to create item status.');
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('status_create', async () => {
+      const stObj = {
+        id: `st-${Date.now()}`,
+        ...newStatusForm
+      };
+      try {
+        const response = await apiFetch('/api/item-statuses', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(stObj)
+        });
+        if (response.ok) {
+          setItemStatuses([...itemStatuses, stObj]);
+          setNewStatusForm({ name: '', canSell: true, status: 'Active' });
+          setAddStatusModalOpen(false);
+        } else {
+          alert('Failed to create item status.');
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleSaveExpenseCategory = async (ecToSave) => {
-    try {
-      const response = await apiFetch(`/api/expense-categories/${ecToSave.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(ecToSave)
-      });
-      if (response.ok) {
-        setExpenseCategories(expenseCategories.map(ec => ec.id === ecToSave.id ? ecToSave : ec));
-        setSelectedExpenseCategory(null);
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('expcat_save', async () => {
+      try {
+        const response = await apiFetch(`/api/expense-categories/${ecToSave.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(ecToSave)
+        });
+        if (response.ok) {
+          setExpenseCategories(expenseCategories.map(ec => ec.id === ecToSave.id ? ecToSave : ec));
+          setSelectedExpenseCategory(null);
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleDeleteExpenseCategory = async (ecId) => {
-    if (!window.confirm('Are you sure you want to delete this expense category?')) return;
-    try {
-      const response = await apiFetch(`/api/expense-categories/${ecId}`, { method: 'DELETE' });
-      if (response.ok) {
-        setExpenseCategories(expenseCategories.filter(ec => ec.id !== ecId));
-        setSelectedExpenseCategory(null);
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('expcat_del', async () => {
+      if (!window.confirm('Are you sure you want to delete this expense category?')) return;
+      try {
+        const response = await apiFetch(`/api/expense-categories/${ecId}`, { method: 'DELETE' });
+        if (response.ok) {
+          setExpenseCategories(expenseCategories.filter(ec => ec.id !== ecId));
+          setSelectedExpenseCategory(null);
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleSaveItemStatus = async (stToSave) => {
-    try {
-      const response = await apiFetch(`/api/item-statuses/${stToSave.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(stToSave)
-      });
-      if (response.ok) {
-        setItemStatuses(itemStatuses.map(st => st.id === stToSave.id ? stToSave : st));
-        setSelectedItemStatus(null);
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('itemstatus_save', async () => {
+      try {
+        const response = await apiFetch(`/api/item-statuses/${stToSave.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(stToSave)
+        });
+        if (response.ok) {
+          setItemStatuses(itemStatuses.map(st => st.id === stToSave.id ? stToSave : st));
+          setSelectedItemStatus(null);
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const handleDeleteItemStatus = async (stId) => {
-    if (!window.confirm('Are you sure you want to delete this item status?')) return;
-    try {
-      const response = await apiFetch(`/api/item-statuses/${stId}`, { method: 'DELETE' });
-      if (response.ok) {
-        setItemStatuses(itemStatuses.filter(st => st.id !== stId));
-        setSelectedItemStatus(null);
-      }
-    } catch (err) { console.error(err); }
+    await runWithLock('itemstatus_del', async () => {
+      if (!window.confirm('Are you sure you want to delete this item status?')) return;
+      try {
+        const response = await apiFetch(`/api/item-statuses/${stId}`, { method: 'DELETE' });
+        if (response.ok) {
+          setItemStatuses(itemStatuses.filter(st => st.id !== stId));
+          setSelectedItemStatus(null);
+        }
+      } catch (err) { console.error(err); }
+    });
   };
 
   const resolveRowBranchId = (row) => {
@@ -1692,6 +1775,20 @@ export default function App() {
   const strictActiveBranchId = (!showAllBranchesScope && currentBranchId && currentBranchId !== 'all' && (!earlyAllowedBranchIds || earlyAllowedBranchIds.includes(String(currentBranchId))))
     ? currentBranchId
     : activeBranchId;
+  // Location privileges: list of branch IDs the role may use (empty = all locations)
+  const allowedBranchIds = earlyAllowedBranchIds;
+  const accessibleBranches = (() => {
+    const list = (branches || []).filter(b => !allowedBranchIds || allowedBranchIds.includes(String(b.id)));
+    if (isRestrictedToSingleLocation && list.length > 1) {
+      if (allowedBranchIds && allowedBranchIds.length) {
+        const found = list.find(b => allowedBranchIds.includes(String(b.id)));
+        if (found) return [found];
+      }
+      const def = list.find(b => b.isDefault) || list[0];
+      return def ? [def] : [];
+    }
+    return list;
+  })();
 
   const filterStrictByBranch = (list, isMasterEntity = false) => {
     if (!list || !Array.isArray(list)) return [];
@@ -2738,14 +2835,14 @@ export default function App() {
     return { start: iso(d), end: iso(end), label: d.toLocaleString('default', { month: 'short', year: 'numeric' }) };
   };
   const comparePeriod = periodBounds(dashboardCompareMode);
-  const compareSalesTotal = (sales || []).filter(s => {
+  const compareSalesTotal = (strictBranchSales || []).filter(s => {
     const d = String(s.date || '').slice(0, 10);
     return d >= comparePeriod.start && d <= comparePeriod.end;
   }).reduce((s, x) => s + (parseFloat(x.totalAmount) || 0), 0);
   const currentMonthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
-  const currentMonthSalesTotal = (sales || []).filter(s => String(s.date || '').slice(0, 10) >= currentMonthStart).reduce((s, x) => s + (parseFloat(x.totalAmount) || 0), 0);
+  const currentMonthSalesTotal = (strictBranchSales || []).filter(s => String(s.date || '').slice(0, 10) >= currentMonthStart).reduce((s, x) => s + (parseFloat(x.totalAmount) || 0), 0);
   const staffSalesThisMonth = {};
-  (sales || []).forEach(s => {
+  (strictBranchSales || []).forEach(s => {
     if (String(s.date || '').slice(0, 10) < currentMonthStart) return;
     const who = s.cashier || s.createdBy || 'Staff';
     staffSalesThisMonth[who] = (staffSalesThisMonth[who] || 0) + (parseFloat(s.totalAmount) || 0);
@@ -2918,10 +3015,6 @@ export default function App() {
   }, [posCart.length]);
 
   const handleCheckout = async () => {
-    if (sessionExpiredModalOpen) {
-      alert('Session expired — please sign in again before completing this sale.');
-      return;
-    }
     if (posCheckoutLockRef.current) return;
     if (posCart.length === 0) return;
     if (!posSelectedCustomer) {
@@ -3281,73 +3374,75 @@ export default function App() {
   const handleSaveNewItem = async (e) => {
     e.preventDefault();
     if (!itemForm.name || !itemForm.price) return;
-    const mode = itemForm.locationMode || (itemForm.allLocations ? 'all' : ((itemForm.allowedBranches || []).length > 0 ? 'multi' : 'single'));
-    const isAllLoc = mode === 'all';
-    const allowedBrs = mode === 'multi' ? (itemForm.allowedBranches || []).map(String).filter(Boolean) : [];
-    if (mode === 'multi' && allowedBrs.length === 0) {
-      alert('Please select at least one location for this item, or choose "All locations".');
-      return;
-    }
-    const rawLocQ = itemForm.locationQuantities && typeof itemForm.locationQuantities === 'object' ? itemForm.locationQuantities : {};
-    const cleanLocQ = {};
-    if (mode === 'all') {
-      (accessibleBranches || branches || []).forEach(b => {
-        cleanLocQ[b.id] = itemForm.trackInventory ? Math.max(0, parseInt(rawLocQ[b.id], 10) || 0) : 999;
-      });
-    } else if (mode === 'multi') {
-      allowedBrs.forEach(bid => {
-        cleanLocQ[bid] = itemForm.trackInventory ? Math.max(0, parseInt(rawLocQ[bid], 10) || 0) : 999;
-      });
-    }
-    const totalQty = (mode === 'all' || mode === 'multi')
-      ? (itemForm.trackInventory ? Object.values(cleanLocQ).reduce((s, v) => s + (Number(v) || 0), 0) : 999)
-      : (itemForm.trackInventory ? (parseInt(itemForm.quantity, 10) || 0) : 999);
-
-    const vv = { ...(itemForm.varianceValues || {}) };
-    (itemVariances || []).forEach(v => {
-      if (v && v.name && vv[v.name] == null) vv[v.name] = '';
-    });
-    const withVar = applyVarianceValuesToItem({}, vv);
-    const newItem = {
-      id: `item-${Date.now()}`,
-      createdBy: currentUser?.name || currentUser?.id || '',
-      branchId: (mode === 'all' || mode === 'multi') ? '' : (itemForm.branchId || activeBranchId || ''),
-      allLocations: isAllLoc,
-      allowedBranches: allowedBrs,
-      locationQuantities: cleanLocQ,
-      name: itemForm.name,
-      sku: (itemForm.sku || '').trim(),
-      size: withVar.size || '',
-      colour: withVar.colour || '',
-      varianceValues: vv,
-      category: itemForm.category,
-      buyingPrice: parseFloat(itemForm.buyingPrice) || 0,
-      price: parseFloat(itemForm.price),
-      wholesalePrice: parseFloat(itemForm.wholesalePrice) || 0,
-      quantity: totalQty,
-      lowStockAlert: parseInt(itemForm.lowStockAlert) || 3,
-      trackInventory: itemForm.trackInventory ? 1 : 0,
-      status: itemForm.status,
-      photoUrl: itemForm.photoUrl || 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=300'
-    };
-
-    try {
-      const res = await apiFetch('/api/inventory', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newItem)
-      });
-      if (res.ok) {
-        setInventory([newItem, ...inventory]);
-        setItemForm({ name: '', sku: '', size: '', colour: '', wholesalePrice: '', category: 'Grade A Jackets', buyingPrice: '', price: '', quantity: '', lowStockAlert: 3, trackInventory: true, status: 'Listed', photoUrl: '', varianceValues: {}, branchId: '', allLocations: false, locationMode: 'single', allowedBranches: [], locationQuantities: {} });
-        setDuplicatingItemName('');
-        setNewItemModalOpen(false);
-      } else {
-        alert('Failed to add item to database.');
+    await runWithLock('item_create', async () => {
+      const mode = itemForm.locationMode || (itemForm.allLocations ? 'all' : ((itemForm.allowedBranches || []).length > 0 ? 'multi' : 'single'));
+      const isAllLoc = mode === 'all';
+      const allowedBrs = mode === 'multi' ? (itemForm.allowedBranches || []).map(String).filter(Boolean) : [];
+      if (mode === 'multi' && allowedBrs.length === 0) {
+        alert('Please select at least one location for this item, or choose "All locations".');
+        return;
       }
-    } catch (e) {
-      console.error(e);
-    }
+      const rawLocQ = itemForm.locationQuantities && typeof itemForm.locationQuantities === 'object' ? itemForm.locationQuantities : {};
+      const cleanLocQ = {};
+      if (mode === 'all') {
+        (accessibleBranches || branches || []).forEach(b => {
+          cleanLocQ[b.id] = itemForm.trackInventory ? Math.max(0, parseInt(rawLocQ[b.id], 10) || 0) : 999;
+        });
+      } else if (mode === 'multi') {
+        allowedBrs.forEach(bid => {
+          cleanLocQ[bid] = itemForm.trackInventory ? Math.max(0, parseInt(rawLocQ[bid], 10) || 0) : 999;
+        });
+      }
+      const totalQty = (mode === 'all' || mode === 'multi')
+        ? (itemForm.trackInventory ? Object.values(cleanLocQ).reduce((s, v) => s + (Number(v) || 0), 0) : 999)
+        : (itemForm.trackInventory ? (parseInt(itemForm.quantity, 10) || 0) : 999);
+
+      const vv = { ...(itemForm.varianceValues || {}) };
+      (itemVariances || []).forEach(v => {
+        if (v && v.name && vv[v.name] == null) vv[v.name] = '';
+      });
+      const withVar = applyVarianceValuesToItem({}, vv);
+      const newItem = {
+        id: `item-${Date.now()}`,
+        createdBy: currentUser?.name || currentUser?.id || '',
+        branchId: (mode === 'all' || mode === 'multi') ? '' : (itemForm.branchId || activeBranchId || ''),
+        allLocations: isAllLoc,
+        allowedBranches: allowedBrs,
+        locationQuantities: cleanLocQ,
+        name: itemForm.name,
+        sku: (itemForm.sku || '').trim(),
+        size: withVar.size || '',
+        colour: withVar.colour || '',
+        varianceValues: vv,
+        category: itemForm.category,
+        buyingPrice: parseFloat(itemForm.buyingPrice) || 0,
+        price: parseFloat(itemForm.price),
+        wholesalePrice: parseFloat(itemForm.wholesalePrice) || 0,
+        quantity: totalQty,
+        lowStockAlert: parseInt(itemForm.lowStockAlert) || 3,
+        trackInventory: itemForm.trackInventory ? 1 : 0,
+        status: itemForm.status,
+        photoUrl: itemForm.photoUrl || 'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=300'
+      };
+
+      try {
+        const res = await apiFetch('/api/inventory', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newItem)
+        });
+        if (res.ok) {
+          setInventory([newItem, ...inventory]);
+          setItemForm({ name: '', sku: '', size: '', colour: '', wholesalePrice: '', category: 'Grade A Jackets', buyingPrice: '', price: '', quantity: '', lowStockAlert: 3, trackInventory: true, status: 'Listed', photoUrl: '', varianceValues: {}, branchId: '', allLocations: false, locationMode: 'single', allowedBranches: [], locationQuantities: {} });
+          setDuplicatingItemName('');
+          setNewItemModalOpen(false);
+        } else {
+          alert('Failed to add item to database.');
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    });
   };
 
   const handleDuplicateItem = (item) => {
@@ -3385,34 +3480,36 @@ export default function App() {
   const handleSaveNewCustomer = async (e) => {
     e.preventDefault();
     if (!customerForm.name) return;
-    const dup = (customers || []).find(c => (c.name || '').trim().toLowerCase() === (customerForm.name || '').trim().toLowerCase());
-    if (dup && !window.confirm(`A customer named "${dup.name}" already exists. Create another with the same name?`)) return;
-    const newCust = {
-      id: `cust-${Date.now()}`,
-      createdBy: currentUser?.name || currentUser?.id || '',
-      ...customerForm,
-      branchId: customerForm.allLocations ? '' : (customerForm.branchId || activeBranchId || undefined),
-      allLocations: !!customerForm.allLocations,
-      creditLimit: parseFloat(customerForm.creditLimit) || 0,
-      creditBalance: parseFloat(customerForm.creditBalance) || 0
-    };
+    await runWithLock('cust_create', async () => {
+      const dup = (customers || []).find(c => (c.name || '').trim().toLowerCase() === (customerForm.name || '').trim().toLowerCase());
+      if (dup && !window.confirm(`A customer named "${dup.name}" already exists. Create another with the same name?`)) return;
+      const newCust = {
+        id: `cust-${Date.now()}`,
+        createdBy: currentUser?.name || currentUser?.id || '',
+        ...customerForm,
+        branchId: customerForm.allLocations ? '' : (customerForm.branchId || activeBranchId || undefined),
+        allLocations: !!customerForm.allLocations,
+        creditLimit: parseFloat(customerForm.creditLimit) || 0,
+        creditBalance: parseFloat(customerForm.creditBalance) || 0
+      };
 
-    try {
-      const res = await apiFetch('/api/customers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newCust)
-      });
-      if (res.ok) {
-        setCustomers([newCust, ...customers]);
-        setCustomerForm({ name: '', phone: '', location: '', eligibility: ['Paid'], salesTermId: '', paymentTerm: '', tags: '', priceList: 'retail', kraPin: '', loyaltyPoints: 0, creditLimit: 0, creditBalance: 0, branchId: '', allLocations: true });
-        setNewCustomerModalOpen(false);
-      } else {
-        alert('Failed to add customer to database.');
+      try {
+        const res = await apiFetch('/api/customers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newCust)
+        });
+        if (res.ok) {
+          setCustomers([newCust, ...customers]);
+          setCustomerForm({ name: '', phone: '', location: '', eligibility: ['Paid'], salesTermId: '', paymentTerm: '', tags: '', priceList: 'retail', kraPin: '', loyaltyPoints: 0, creditLimit: 0, creditBalance: 0, branchId: '', allLocations: true });
+          setNewCustomerModalOpen(false);
+        } else {
+          alert('Failed to add customer to database.');
+        }
+      } catch (e) {
+        console.error(e);
       }
-    } catch (e) {
-      console.error(e);
-    }
+    });
   };
 
 
@@ -3422,50 +3519,54 @@ export default function App() {
       alert('Employee name is required.');
       return;
     }
-    const isUpdate = employees.some(e => e.id === emp.id);
-    const next = isUpdate ? employees.map(e => e.id === emp.id ? emp : e) : [emp, ...employees];
-    setEmployees(next);
-    setEmployeeModalOpen(false);
-    setSelectedEmployee(null);
-    setEmployeeForm({ name: '', position: '', department: (hrSettings.departments && hrSettings.departments[0]) || 'Sales', phone: '', email: '', hireDate: '', salary: '', status: 'Active', nationalId: '', bankAccount: '', bankName: '', leaveBalance: hrSettings.defaultAnnualLeave || 21, managerId: '', branchId: '' });
-    try {
-      const method = isUpdate ? 'PUT' : 'POST';
-      const url = isUpdate ? `/api/employees/${emp.id}` : '/api/employees';
-      const payload = {
-        id: emp.id,
-        name: emp.name,
-        position: emp.position || '',
-        department: emp.department || '',
-        phone: emp.phone || '',
-        email: emp.email || '',
-        hireDate: emp.hireDate || '',
-        salary: parseFloat(emp.salary) || 0,
-        status: emp.status || 'Active',
-        nationalId: emp.nationalId || '',
-        bankAccount: emp.bankAccount || '',
-        bankName: emp.bankName || '',
-        leaveBalance: parseFloat(emp.leaveBalance) ?? 21,
-        managerId: emp.managerId || '',
-        userId: emp.userId || '',
-        branchId: emp.branchId || strictActiveBranchId || activeBranchId || undefined
-      };
-      const res = await apiFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      if (!res.ok) {
-        const errText = await res.text().catch(() => '');
-        console.warn('Employee saved locally; API returned', res.status, errText);
+    await runWithLock('emp_save', async () => {
+      const isUpdate = employees.some(e => e.id === emp.id);
+      const next = isUpdate ? employees.map(e => e.id === emp.id ? emp : e) : [emp, ...employees];
+      setEmployees(next);
+      setEmployeeModalOpen(false);
+      setSelectedEmployee(null);
+      setEmployeeForm({ name: '', position: '', department: (hrSettings.departments && hrSettings.departments[0]) || 'Sales', phone: '', email: '', hireDate: '', salary: '', status: 'Active', nationalId: '', bankAccount: '', bankName: '', leaveBalance: hrSettings.defaultAnnualLeave || 21, managerId: '', branchId: '' });
+      try {
+        const method = isUpdate ? 'PUT' : 'POST';
+        const url = isUpdate ? `/api/employees/${emp.id}` : '/api/employees';
+        const payload = {
+          id: emp.id,
+          name: emp.name,
+          position: emp.position || '',
+          department: emp.department || '',
+          phone: emp.phone || '',
+          email: emp.email || '',
+          hireDate: emp.hireDate || '',
+          salary: parseFloat(emp.salary) || 0,
+          status: emp.status || 'Active',
+          nationalId: emp.nationalId || '',
+          bankAccount: emp.bankAccount || '',
+          bankName: emp.bankName || '',
+          leaveBalance: parseFloat(emp.leaveBalance) ?? 21,
+          managerId: emp.managerId || '',
+          userId: emp.userId || '',
+          branchId: emp.branchId || strictActiveBranchId || activeBranchId || undefined
+        };
+        const res = await apiFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        if (!res.ok) {
+          const errText = await res.text().catch(() => '');
+          console.warn('Employee saved locally; API returned', res.status, errText);
+        }
+      } catch (e) {
+        console.warn('Employee saved locally; API unavailable', e);
       }
-    } catch (e) {
-      console.warn('Employee saved locally; API unavailable', e);
-    }
+    });
   };
 
   const handleDeleteEmployee = async (id) => {
-    if (!confirm('Delete this employee?')) return;
-    const next = employees.filter(e => e.id !== id);
-    setEmployees(next);
-    try {
-      await apiFetch(`/api/employees/${id}`, { method: 'DELETE' });
-    } catch (e) { console.warn('Employee deleted locally; API unavailable', e); }
+    await runWithLock('emp_del', async () => {
+      if (!confirm('Delete this employee?')) return;
+      const next = employees.filter(e => e.id !== id);
+      setEmployees(next);
+      try {
+        await apiFetch(`/api/employees/${id}`, { method: 'DELETE' });
+      } catch (e) { console.warn('Employee deleted locally; API unavailable', e); }
+    });
   };
 
   const calcLeaveDays = (start, end) => {
@@ -3475,89 +3576,93 @@ export default function App() {
     return Math.max(0, diff);
   };
 
-    const handleSaveLeave = async () => {
-    const resolvedEmployeeId = leaveForm.employeeId || ((!(isAdminUser || canUpdate('hr') || canUpdate('employees')) && currentEmployeeRecord?.id) ? currentEmployeeRecord.id : '');
-    if (!resolvedEmployeeId || !leaveForm.startDate || !leaveForm.endDate) {
-      alert((!(isAdminUser || canUpdate('hr') || canUpdate('employees')) && !currentEmployeeRecord) ? 'Your login is not linked to an employee. Ask admin to set User on your employee record.' : 'Select employee and dates.');
-      return;
-    }
-    if (!employees.length) {
-      alert('Add employees first before creating leave requests.');
-      return;
-    }
-    const emp = employees.find(e => e.id === resolvedEmployeeId);
-    if (!emp) {
-      alert('Selected employee not found. Save the employee first.');
-      return;
-    }
-    const days = calcLeaveDays(leaveForm.startDate, leaveForm.endDate);
-    if (days <= 0) {
-      alert('End date must be on or after start date.');
-      return;
-    }
-    const manager = employees.find(e => e.id === emp?.managerId);
-    const req = {
-      id: `leave-${Date.now()}`,
-      employeeId: resolvedEmployeeId,
-      employeeName: emp?.name || '',
-      branchId: emp?.branchId || strictActiveBranchId || activeBranchId || undefined,
-      leaveType: leaveForm.leaveType || 'Annual',
-      startDate: leaveForm.startDate,
-      endDate: leaveForm.endDate,
-      days,
-      reason: leaveForm.reason || '',
-      status: 'Pending',
-      approvedBy: '',
-      managerId: emp?.managerId || '',
-      approverId: emp?.managerId || '',
-      managerName: manager?.name || '',
-      createdAt: new Date().toISOString()
-    };
-    const next = [req, ...leaveRequests];
-    setLeaveRequests(next);
-    setLeaveModalOpen(false);
-    setLeaveForm({ employeeId: '', leaveType: (hrSettings.leaveTypes && hrSettings.leaveTypes[0]) || 'Annual', startDate: '', endDate: '', reason: '' });
-    try {
-      const res = await apiFetch('/api/leave-requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req) });
-      if (!res.ok) console.warn('Leave saved locally; API returned', res.status);
-    } catch (e) { console.warn('Leave saved locally; API unavailable', e); }
+  const handleSaveLeave = async () => {
+    await runWithLock('leave_create', async () => {
+      const resolvedEmployeeId = leaveForm.employeeId || ((!(isAdminUser || canUpdate('hr') || canUpdate('employees')) && currentEmployeeRecord?.id) ? currentEmployeeRecord.id : '');
+      if (!resolvedEmployeeId || !leaveForm.startDate || !leaveForm.endDate) {
+        alert((!(isAdminUser || canUpdate('hr') || canUpdate('employees')) && !currentEmployeeRecord) ? 'Your login is not linked to an employee. Ask admin to set User on your employee record.' : 'Select employee and dates.');
+        return;
+      }
+      if (!employees.length) {
+        alert('Add employees first before creating leave requests.');
+        return;
+      }
+      const emp = employees.find(e => e.id === resolvedEmployeeId);
+      if (!emp) {
+        alert('Selected employee not found. Save the employee first.');
+        return;
+      }
+      const days = calcLeaveDays(leaveForm.startDate, leaveForm.endDate);
+      if (days <= 0) {
+        alert('End date must be on or after start date.');
+        return;
+      }
+      const manager = employees.find(e => e.id === emp?.managerId);
+      const req = {
+        id: `leave-${Date.now()}`,
+        employeeId: resolvedEmployeeId,
+        employeeName: emp?.name || '',
+        branchId: emp?.branchId || strictActiveBranchId || activeBranchId || undefined,
+        leaveType: leaveForm.leaveType || 'Annual',
+        startDate: leaveForm.startDate,
+        endDate: leaveForm.endDate,
+        days,
+        reason: leaveForm.reason || '',
+        status: 'Pending',
+        approvedBy: '',
+        managerId: emp?.managerId || '',
+        approverId: emp?.managerId || '',
+        managerName: manager?.name || '',
+        createdAt: new Date().toISOString()
+      };
+      const next = [req, ...leaveRequests];
+      setLeaveRequests(next);
+      setLeaveModalOpen(false);
+      setLeaveForm({ employeeId: '', leaveType: (hrSettings.leaveTypes && hrSettings.leaveTypes[0]) || 'Annual', startDate: '', endDate: '', reason: '' });
+      try {
+        const res = await apiFetch('/api/leave-requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req) });
+        if (!res.ok) console.warn('Leave saved locally; API returned', res.status);
+      } catch (e) { console.warn('Leave saved locally; API unavailable', e); }
+    });
   };
 
   const handleLeaveAction = async (req, status) => {
-    const updated = {
-      ...req,
-      status,
-      approvedBy: currentUser?.name || currentUser?.id || 'Admin',
-      decidedAt: new Date().toISOString()
-    };
-    let nextLeave = leaveRequests.map(l => l.id === req.id ? updated : l);
-    setLeaveRequests(nextLeave);
-    if (status === 'Approved' && !req.balanceDeducted) {
-      const emp = employees.find(e => e.id === req.employeeId);
-      if (emp) {
-        const days = parseFloat(req.days) || 0;
-        const newBal = Math.max(0, (parseFloat(emp.leaveBalance) ?? 21) - days);
-        const empUpd = { ...emp, leaveBalance: newBal };
-        const nextEmp = employees.map(e => e.id === emp.id ? empUpd : e);
-        setEmployees(nextEmp);
-        try {
-          await apiFetch(`/api/employees/${emp.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(empUpd) });
-        } catch (e) {}
-        updated.balanceDeducted = true;
-        nextLeave = nextLeave.map(l => l.id === req.id ? { ...updated } : l);
-        setLeaveRequests(nextLeave);
+    await runWithLock(`leave_act:${req.id}`, async () => {
+      const updated = {
+        ...req,
+        status,
+        approvedBy: currentUser?.name || currentUser?.id || 'Admin',
+        decidedAt: new Date().toISOString()
+      };
+      let nextLeave = leaveRequests.map(l => l.id === req.id ? updated : l);
+      setLeaveRequests(nextLeave);
+      if (status === 'Approved' && !req.balanceDeducted) {
+        const emp = employees.find(e => e.id === req.employeeId);
+        if (emp) {
+          const days = parseFloat(req.days) || 0;
+          const newBal = Math.max(0, (parseFloat(emp.leaveBalance) ?? 21) - days);
+          const empUpd = { ...emp, leaveBalance: newBal };
+          const nextEmp = employees.map(e => e.id === emp.id ? empUpd : e);
+          setEmployees(nextEmp);
+          try {
+            await apiFetch(`/api/employees/${emp.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(empUpd) });
+          } catch (e) {}
+          updated.balanceDeducted = true;
+          nextLeave = nextLeave.map(l => l.id === req.id ? { ...updated } : l);
+          setLeaveRequests(nextLeave);
+        }
       }
-    }
-    try {
-      const res = await apiFetch(`/api/leave-requests/${req.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) });
-      if (!res.ok) {
-        await apiFetch('/api/leave-requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) });
-      }
-    } catch (e) {
       try {
-        await apiFetch('/api/leave-requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) });
-      } catch (e2) { console.warn('Leave status kept locally', e2); }
-    }
+        const res = await apiFetch(`/api/leave-requests/${req.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) });
+        if (!res.ok) {
+          await apiFetch('/api/leave-requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) });
+        }
+      } catch (e) {
+        try {
+          await apiFetch('/api/leave-requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) });
+        } catch (e2) { console.warn('Leave status kept locally', e2); }
+      }
+    });
   };
 
   const handleGeneratePayroll = async () => {
@@ -3565,90 +3670,95 @@ export default function App() {
       alert('Select employee and period (e.g. 2026-10).');
       return;
     }
-    const emp = employees.find(e => e.id === payrollForm.employeeId);
-    if (!emp) return;
-    const basic = parseFloat(emp.salary) || 0;
-    const aItems = payrollForm.allowanceItems || {};
-    const dItems = payrollForm.deductionItems || {};
-    const allowances = Object.values(aItems).reduce((s, v) => s + (parseFloat(v) || 0), 0);
-    const deductions = Object.values(dItems).reduce((s, v) => s + (parseFloat(v) || 0), 0);
-    const taxAmount = parseFloat(dItems.PAYE) || 0;
-    const netPay = basic + allowances - deductions;
-    const noteParts = [];
-    if (payrollForm.notes) noteParts.push(payrollForm.notes);
-    if ((parseFloat(aItems.Other) || 0) > 0 && payrollForm.allowanceOtherSpec) noteParts.push('Allowance Other: ' + payrollForm.allowanceOtherSpec);
-    if ((parseFloat(dItems.Other) || 0) > 0 && payrollForm.deductionOtherSpec) noteParts.push('Deduction Other: ' + payrollForm.deductionOtherSpec);
-    const rec = {
-      id: `pay-${Date.now()}`,
-      employeeId: emp.id,
-      employeeName: emp.name,
-      branchId: emp.branchId || strictActiveBranchId || activeBranchId || undefined,
-      period: payrollForm.period,
-      createdBy: currentUser?.name || currentUser?.id || '',
-      basicSalary: basic,
-      allowances,
-      deductions,
-      taxAmount,
-      netPay,
-      status: 'Draft',
-      paidDate: '',
-      notes: noteParts.join(' | '),
-      allowanceBreakdown: { ...aItems, _otherSpec: payrollForm.allowanceOtherSpec || '' },
-      deductionBreakdown: { ...dItems, _otherSpec: payrollForm.deductionOtherSpec || '' }
-    };
-    setPayrollRecords([rec, ...payrollRecords]);
-    setPayrollModalOpen(false);
-    setPayrollForm({
-      employeeId: '', period: '', notes: '',
-      allowanceItems: { Housing: 0, Transport: 0, Airtime: 0, Bonus: 0, Other: 0 },
-      allowanceOtherSpec: '',
-      deductionItems: { PAYE: 0, 'NHL/Housing Levy': 0, NSSF: 0, SHA: 0, Loan: 0, Pension: 0, Other: 0 },
-      deductionOtherSpec: ''
+    await runWithLock('payroll_create', async () => {
+      const emp = employees.find(e => e.id === payrollForm.employeeId);
+      if (!emp) return;
+      const basic = parseFloat(emp.salary) || 0;
+      const aItems = payrollForm.allowanceItems || {};
+      const dItems = payrollForm.deductionItems || {};
+      const allowances = Object.values(aItems).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+      const deductions = Object.values(dItems).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+      const taxAmount = parseFloat(dItems.PAYE) || 0;
+      const netPay = basic + allowances - deductions;
+      const noteParts = [];
+      if (payrollForm.notes) noteParts.push(payrollForm.notes);
+      if ((parseFloat(aItems.Other) || 0) > 0 && payrollForm.allowanceOtherSpec) noteParts.push('Allowance Other: ' + payrollForm.allowanceOtherSpec);
+      if ((parseFloat(dItems.Other) || 0) > 0 && payrollForm.deductionOtherSpec) noteParts.push('Deduction Other: ' + payrollForm.deductionOtherSpec);
+      const rec = {
+        id: `pay-${Date.now()}`,
+        employeeId: emp.id,
+        employeeName: emp.name,
+        branchId: emp.branchId || strictActiveBranchId || activeBranchId || undefined,
+        period: payrollForm.period,
+        createdBy: currentUser?.name || currentUser?.id || '',
+        basicSalary: basic,
+        allowances,
+        deductions,
+        taxAmount,
+        netPay,
+        status: 'Draft',
+        paidDate: '',
+        notes: noteParts.join(' | '),
+        allowanceBreakdown: { ...aItems, _otherSpec: payrollForm.allowanceOtherSpec || '' },
+        deductionBreakdown: { ...dItems, _otherSpec: payrollForm.deductionOtherSpec || '' }
+      };
+      setPayrollRecords([rec, ...payrollRecords]);
+      setPayrollModalOpen(false);
+      setPayrollForm({
+        employeeId: '', period: '', notes: '',
+        allowanceItems: { Housing: 0, Transport: 0, Airtime: 0, Bonus: 0, Other: 0 },
+        allowanceOtherSpec: '',
+        deductionItems: { PAYE: 0, 'NHL/Housing Levy': 0, NSSF: 0, SHA: 0, Loan: 0, Pension: 0, Other: 0 },
+        deductionOtherSpec: ''
+      });
+      try {
+        await apiFetch('/api/payroll', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rec) });
+      } catch (e) { console.warn('Payroll saved locally; API unavailable', e); }
     });
-    try {
-      await apiFetch('/api/payroll', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rec) });
-    } catch (e) { console.warn('Payroll saved locally; API unavailable', e); }
   };
 
   const handleMarkPayrollPaid = async (rec, payMethod) => {
-    const method = payMethod || payrollPayMethod || 'Cash';
-    const updated = { ...rec, status: 'Paid', paidDate: new Date().toISOString().split('T')[0], paymentMethod: method };
-    setPayrollRecords(payrollRecords.map(p => p.id === rec.id ? updated : p));
-    // Deduct net pay from selected payment account (as payroll expense)
-    const net = parseFloat(rec.netPay) || 0;
-    if (net > 0) {
-      const exp = {
-        id: `exp-payroll-${rec.id}-${Date.now()}`,
-        branchId: rec.branchId || activeBranchId || '',
-        date: new Date().toISOString().split('T')[0],
-        category: 'Payroll',
-        description: `Payroll payment — ${rec.employeeName} (${rec.period})`,
-        amount: net,
-        paidAmount: net,
-        balanceDue: 0,
-        paymentStatus: 'Paid',
-        paymentMethod: method,
-        mpesaCode: '',
-        paymentHistory: [{ id: `exppay-${Date.now()}`, date: new Date().toISOString(), amount: net, paymentMethod: method, mpesaCode: '' }],
-        payer: currentUser?.name || 'Admin',
-        paidTo: rec.employeeName || 'Employee',
-        taxAmount: 0
-      };
-      setExpenses(prev => [exp, ...prev]);
-      logAudit('payment', 'payroll', `${rec.employeeName} (${rec.period}) · ${shopProfile.currency} ${net} via ${method}`);
-      try { await apiFetch('/api/expenses', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(exp) }); } catch (e) {}
-    }
-    try {
-      await apiFetch(`/api/payroll/${rec.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) });
-    } catch (e) { console.warn('Payroll paid locally; API unavailable', e); }
+    await runWithLock(`payroll_pay:${rec.id}`, async () => {
+      const method = payMethod || payrollPayMethod || 'Cash';
+      const updated = { ...rec, status: 'Paid', paidDate: new Date().toISOString().split('T')[0], paymentMethod: method };
+      setPayrollRecords(payrollRecords.map(p => p.id === rec.id ? updated : p));
+      const net = parseFloat(rec.netPay) || 0;
+      if (net > 0) {
+        const exp = {
+          id: `exp-payroll-${rec.id}-${Date.now()}`,
+          branchId: rec.branchId || activeBranchId || '',
+          date: new Date().toISOString().split('T')[0],
+          category: 'Payroll',
+          description: `Payroll payment — ${rec.employeeName} (${rec.period})`,
+          amount: net,
+          paidAmount: net,
+          balanceDue: 0,
+          paymentStatus: 'Paid',
+          paymentMethod: method,
+          mpesaCode: '',
+          paymentHistory: [{ id: `exppay-${Date.now()}`, date: new Date().toISOString(), amount: net, paymentMethod: method, mpesaCode: '' }],
+          payer: currentUser?.name || 'Admin',
+          paidTo: rec.employeeName || 'Employee',
+          taxAmount: 0
+        };
+        setExpenses(prev => [exp, ...prev]);
+        logAudit('payment', 'payroll', `${rec.employeeName} (${rec.period}) · ${shopProfile.currency} ${net} via ${method}`);
+        try { await apiFetch('/api/expenses', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(exp) }); } catch (e) {}
+      }
+      try {
+        await apiFetch(`/api/payroll/${rec.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) });
+      } catch (e) { console.warn('Payroll paid locally; API unavailable', e); }
+    });
   };
 
   const handleDeletePayroll = async (id) => {
-    if (!confirm('Delete this payroll record?')) return;
-    const next = payrollRecords.filter(p => p.id !== id);
-    setPayrollRecords(next);
-    setSelectedPayroll(null);
-    try { await apiFetch(`/api/payroll/${id}`, { method: 'DELETE' }); } catch (e) {}
+    await runWithLock('payroll_del', async () => {
+      if (!confirm('Delete this payroll record?')) return;
+      const next = payrollRecords.filter(p => p.id !== id);
+      setPayrollRecords(next);
+      setSelectedPayroll(null);
+      try { await apiFetch(`/api/payroll/${id}`, { method: 'DELETE' }); } catch (e) {}
+    });
   };
 
   useEffect(() => {
@@ -3666,32 +3776,36 @@ export default function App() {
   }, [payrollPrintMode, selectedPayroll]);
 
 
-    const handleSaveLeaveRequest = async (req) => {
-    const days = calcLeaveDays(req.startDate, req.endDate);
-    const emp = employees.find(e => e.id === req.employeeId);
-    const manager = employees.find(e => e.id === (req.managerId || emp?.managerId));
-    const updated = {
-      ...req,
-      days,
-      employeeName: emp?.name || req.employeeName,
-      managerId: emp?.managerId || req.managerId || '',
-      approverId: emp?.managerId || req.approverId || '',
-      managerName: manager?.name || req.managerName || ''
-    };
-    const next = leaveRequests.map(l => l.id === updated.id ? updated : l);
-    setLeaveRequests(next);
-    setSelectedLeave(null);
-    try {
-      await apiFetch(`/api/leave-requests/${updated.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) });
-    } catch (e) { console.warn('Leave updated locally', e); }
+  const handleSaveLeaveRequest = async (req) => {
+    await runWithLock('leave_save', async () => {
+      const days = calcLeaveDays(req.startDate, req.endDate);
+      const emp = employees.find(e => e.id === req.employeeId);
+      const manager = employees.find(e => e.id === (req.managerId || emp?.managerId));
+      const updated = {
+        ...req,
+        days,
+        employeeName: emp?.name || req.employeeName,
+        managerId: emp?.managerId || req.managerId || '',
+        approverId: emp?.managerId || req.approverId || '',
+        managerName: manager?.name || req.managerName || ''
+      };
+      const next = leaveRequests.map(l => l.id === updated.id ? updated : l);
+      setLeaveRequests(next);
+      setSelectedLeave(null);
+      try {
+        await apiFetch(`/api/leave-requests/${updated.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) });
+      } catch (e) { console.warn('Leave updated locally', e); }
+    });
   };
 
   const handleDeleteLeaveRequest = async (id) => {
-    if (!confirm('Delete this leave request?')) return;
-    const next = leaveRequests.filter(l => l.id !== id);
-    setLeaveRequests(next);
-    setSelectedLeave(null);
-    try { await apiFetch(`/api/leave-requests/${id}`, { method: 'DELETE' }); } catch (e) {}
+    await runWithLock('leave_del', async () => {
+      if (!confirm('Delete this leave request?')) return;
+      const next = leaveRequests.filter(l => l.id !== id);
+      setLeaveRequests(next);
+      setSelectedLeave(null);
+      try { await apiFetch(`/api/leave-requests/${id}`, { method: 'DELETE' }); } catch (e) {}
+    });
   };
 
   const saveTenantSettingsPartial = (partial) => {
@@ -3734,116 +3848,117 @@ export default function App() {
 
   const handleProcessSalesReturn = async () => {
     if (!salesReturnSale) return;
-    const items = salesReturnSale.items || [];
-    let refundSubtotal = 0;
-    const summaryParts = [];
-    items.forEach((it, idx) => {
-      const ret = Math.min(Math.max(0, parseInt(salesReturnQtys[idx], 10) || 0), Math.max(0, (Number(it.qty) || 0) - (Number(it.returnedQty) || 0)));
-      if (ret > 0) {
-        refundSubtotal += (it.price || 0) * ret;
-        summaryParts.push(`${it.name || 'Item'} ×${ret}`);
+    await runWithLock('sales_ret', async () => {
+      const items = salesReturnSale.items || [];
+      let refundSubtotal = 0;
+      const summaryParts = [];
+      items.forEach((it, idx) => {
+        const ret = Math.min(Math.max(0, parseInt(salesReturnQtys[idx], 10) || 0), Math.max(0, (Number(it.qty) || 0) - (Number(it.returnedQty) || 0)));
+        if (ret > 0) {
+          refundSubtotal += (it.price || 0) * ret;
+          summaryParts.push(`${it.name || 'Item'} ×${ret}`);
+        }
+      });
+      if (refundSubtotal <= 0) {
+        alert('Select at least one item quantity to return.');
+        return;
       }
-    });
-    if (refundSubtotal <= 0) {
-      alert('Select at least one item quantity to return.');
-      return;
-    }
-    const origSub = items.reduce((s, it) => s + (it.price || 0) * (it.qty || 1), 0) || salesReturnSale.totalAmount || 1;
-    const origTax = parseFloat(salesReturnSale.taxAmount) || 0;
-    const refundTax = origSub > 0 ? (refundSubtotal / origSub) * origTax : 0;
-    const refundTotal = Math.round((refundSubtotal + (salesReturnSale.taxInclusive ? 0 : refundTax)) * 100) / 100;
-    const actualRefund = Math.min(refundTotal, Math.max(0, Number(salesReturnSale.paidAmount) || 0));
-    const returnPayload = {
-      saleId: salesReturnSale.id,
-      returnQtys: Object.fromEntries(Object.entries(salesReturnQtys).map(([k, v]) => [k, Number(v) || 0])),
-      disposition: salesReturnDisposition,
-      method: salesReturnMethod,
-      taxInclusive: !!salesReturnSale.taxInclusive
-    };
+      const origSub = items.reduce((s, it) => s + (it.price || 0) * (it.qty || 1), 0) || salesReturnSale.totalAmount || 1;
+      const origTax = parseFloat(salesReturnSale.taxAmount) || 0;
+      const refundTax = origSub > 0 ? (refundSubtotal / origSub) * origTax : 0;
+      const refundTotal = Math.round((refundSubtotal + (salesReturnSale.taxInclusive ? 0 : refundTax)) * 100) / 100;
+      const actualRefund = Math.min(refundTotal, Math.max(0, Number(salesReturnSale.paidAmount) || 0));
+      const returnPayload = {
+        saleId: salesReturnSale.id,
+        returnQtys: Object.fromEntries(Object.entries(salesReturnQtys).map(([k, v]) => [k, Number(v) || 0])),
+        disposition: salesReturnDisposition,
+        method: salesReturnMethod,
+        taxInclusive: !!salesReturnSale.taxInclusive
+      };
 
-    // Users WITHOUT sales.update must seek Manager approval instead of directly mutating stock/refunds
-    if (!(isAdminUser || canUpdate('sales'))) {
+      if (!(isAdminUser || canUpdate('sales'))) {
+        try {
+          const reqRes = await apiFetch('/api/return-requests', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              kind: 'sale',
+              refId: salesReturnSale.id,
+              partyName: salesReturnSale.customerName || 'Walk-in',
+              summary: summaryParts.join(', '),
+              estimatedAmount: refundTotal,
+              reason: returnReasonDraft || '',
+              payload: returnPayload
+            })
+          });
+          const reqData = await reqRes.json().catch(() => ({}));
+          if (!reqRes.ok) {
+            alert(reqData.error || 'Could not submit sales return request.');
+            return;
+          }
+          if (Array.isArray(reqData.returnRequests)) setReturnRequests(reqData.returnRequests);
+          else if (reqData.request) setReturnRequests(prev => [reqData.request, ...(prev || [])]);
+          logAudit('return_request', 'sales_return', `Sale ${salesReturnSale.id} (${summaryParts.join(', ')}) · Est ${shopProfile.currency} ${refundTotal} — awaiting Manager approval`);
+          setSalesReturnModalOpen(false);
+          setSalesReturnSale(null);
+          setSelectedSaleItem(null);
+          setReturnReasonDraft('');
+          alert('Sales Return request submitted to Manager for approval.');
+        } catch (e) {
+          alert('Network error submitting sales return request.');
+        }
+        return;
+      }
+
       try {
-        const reqRes = await apiFetch('/api/return-requests', {
+        const res = await apiFetch('/api/sales-return', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            kind: 'sale',
-            refId: salesReturnSale.id,
-            partyName: salesReturnSale.customerName || 'Walk-in',
-            summary: summaryParts.join(', '),
-            estimatedAmount: refundTotal,
-            reason: returnReasonDraft || '',
-            payload: returnPayload
-          })
+          body: JSON.stringify(returnPayload)
         });
-        const reqData = await reqRes.json().catch(() => ({}));
-        if (!reqRes.ok) {
-          alert(reqData.error || 'Could not submit sales return request.');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          alert(data.error || 'Sales return failed.');
           return;
         }
-        if (Array.isArray(reqData.returnRequests)) setReturnRequests(reqData.returnRequests);
-        else if (reqData.request) setReturnRequests(prev => [reqData.request, ...(prev || [])]);
-        logAudit('return_request', 'sales_return', `Sale ${salesReturnSale.id} (${summaryParts.join(', ')}) · Est ${shopProfile.currency} ${refundTotal} — awaiting Manager approval`);
+        if (data.sale) {
+          let saleItems = data.sale.items;
+          try { saleItems = typeof saleItems === 'string' ? JSON.parse(saleItems || '[]') : (saleItems || []); } catch (_) {}
+          let ph = data.sale.paymentHistory;
+          try { if (typeof ph === 'string') ph = JSON.parse(ph || '[]'); } catch (_) { ph = []; }
+          const merged = { ...data.sale, items: saleItems, paymentHistory: Array.isArray(ph) ? ph : [], type: data.sale.saleType };
+          setSales(sales.map(s => s.id === merged.id ? merged : s));
+        }
+        if (Array.isArray(data.inventory) && data.inventory.length) {
+          setInventory(prev => {
+            const byId = Object.fromEntries(data.inventory.map(r => [r.id, r]));
+            return prev.map(inv => byId[inv.id] ? { ...inv, ...byId[inv.id] } : inv);
+          });
+        }
+        if (actualRefund > 0) {
+          const methodName = salesReturnMethod.toLowerCase();
+          setPaymentMethods(prev => {
+            let matched = false;
+            const next = prev.map(pm => {
+              const n = (pm.name || '').toLowerCase();
+              const isMatch = methodName.includes('cash') ? n === 'cash' : (methodName.includes('pesa') ? (n.includes('m-pesa') || n.includes('mpesa')) : n === methodName);
+              if (!isMatch) return pm;
+              matched = true;
+              return { ...pm, startingBalance: Math.max(0, (Number(pm.startingBalance) || 0) - actualRefund) };
+            });
+            if (!matched) return next;
+            return next;
+          });
+        }
+        logAudit('sales_return', 'sales', `Sale ${salesReturnSale.id} · Refund ${shopProfile.currency} ${(data.refundTotal ?? refundTotal)} via ${salesReturnMethod}`);
         setSalesReturnModalOpen(false);
         setSalesReturnSale(null);
         setSelectedSaleItem(null);
-        setReturnReasonDraft('');
-        alert('Sales Return request submitted to Manager for approval.');
+        alert(`Sales return processed. Refund: ${shopProfile.currency} ${(data.refundTotal ?? refundTotal).toLocaleString()} via ${salesReturnMethod}. Inventory updated.`);
       } catch (e) {
-        alert('Network error submitting sales return request.');
+        alert('Network error processing sales return.');
       }
-      return;
-    }
-
-    try {
-      const res = await apiFetch('/api/sales-return', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(returnPayload)
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        alert(data.error || 'Sales return failed.');
-        return;
-      }
-      if (data.sale) {
-        let saleItems = data.sale.items;
-        try { saleItems = typeof saleItems === 'string' ? JSON.parse(saleItems || '[]') : (saleItems || []); } catch (_) {}
-        let ph = data.sale.paymentHistory;
-        try { if (typeof ph === 'string') ph = JSON.parse(ph || '[]'); } catch (_) { ph = []; }
-        const merged = { ...data.sale, items: saleItems, paymentHistory: Array.isArray(ph) ? ph : [], type: data.sale.saleType };
-        setSales(sales.map(s => s.id === merged.id ? merged : s));
-      }
-      if (Array.isArray(data.inventory) && data.inventory.length) {
-        setInventory(prev => {
-          const byId = Object.fromEntries(data.inventory.map(r => [r.id, r]));
-          return prev.map(inv => byId[inv.id] ? { ...inv, ...byId[inv.id] } : inv);
-        });
-      }
-      if (actualRefund > 0) {
-        const methodName = salesReturnMethod.toLowerCase();
-        setPaymentMethods(prev => {
-          let matched = false;
-          const next = prev.map(pm => {
-            const n = (pm.name || '').toLowerCase();
-            const isMatch = methodName.includes('cash') ? n === 'cash' : (methodName.includes('pesa') ? (n.includes('m-pesa') || n.includes('mpesa')) : n === methodName);
-            if (!isMatch) return pm;
-            matched = true;
-            return { ...pm, startingBalance: Math.max(0, (Number(pm.startingBalance) || 0) - actualRefund) };
-          });
-          if (!matched) return next;
-          return next;
-        });
-      }
-      logAudit('sales_return', 'sales', `Sale ${salesReturnSale.id} · Refund ${shopProfile.currency} ${(data.refundTotal ?? refundTotal)} via ${salesReturnMethod}`);
-      setSalesReturnModalOpen(false);
-      setSalesReturnSale(null);
-      setSelectedSaleItem(null);
-      alert(`Sales return processed. Refund: ${shopProfile.currency} ${(data.refundTotal ?? refundTotal).toLocaleString()} via ${salesReturnMethod}. Inventory updated.`);
-    } catch (e) {
-      alert('Network error processing sales return.');
-    }
+    });
   };
 
   // --- Purchase Return: reduce stock; reduce PO debt / paid ---
@@ -3955,255 +4070,275 @@ export default function App() {
 
   const handleProcessPurchaseReturn = async () => {
     if (!purchaseReturnPO) return;
-    const po = purchaseReturnPO;
-    const already = Number(po.returnedQty) || 0;
-    const wasReceived = !!(po.received || (Number(po.receivedQty) || 0) > 0 || ['Received', 'Partially Received', 'Payment', 'Purchase Return'].includes(po.workflowStatus));
-    if (!wasReceived) {
-      alert('A purchase return can only be created after goods have been received.');
-      return;
-    }
-    const recTotal = po.received ? (Number(po.quantity) || 0) : ((Number(po.receivedQty) || 0) > 0 ? Number(po.receivedQty) : (Number(po.quantity) || 0));
-    const maxRet = Math.max(0, recTotal - already);
-    const lines = po._returnLines || [];
-    let requestedRet = 0;
-    const returnLines = [];
-    const lineEntries = Object.entries(purchaseReturnLineQtys || {});
-    if (lineEntries.length && lines.length) {
-      lines.forEach((ln, idx) => {
-        const lineCap = Math.max(0, (Number(ln.receivedQty) || 0) - (Number(ln.returnedQty) || 0));
-        const q = Math.min(lineCap, Math.max(0, parseInt(purchaseReturnLineQtys[idx], 10) || 0));
-        if (q > 0) {
-          requestedRet += q;
-          returnLines.push({ itemId: ln.itemId, itemName: ln.itemName, qty: q, cost: Number(ln.cost) || Number(po.cost) || 0 });
-        }
-      });
-    } else if (lineEntries.length) {
-      requestedRet = lineEntries.reduce((s, [, v]) => s + (Math.max(0, parseInt(v, 10) || 0)), 0);
-    } else {
-      requestedRet = Math.max(1, parseInt(purchaseReturnQty, 10) || 0);
-    }
-    if (maxRet <= 0) {
-      alert('No remaining received quantity to return on this PO.');
-      return;
-    }
-    if (requestedRet <= 0) {
-      alert('Enter a valid return quantity.');
-      return;
-    }
-    if (requestedRet > maxRet) {
-      alert(`Cannot return ${requestedRet} unit(s). Only ${maxRet} received unit(s) available to return.`);
-      return;
-    }
-    const payMethod = purchaseReturnRefundMethod || po.paymentMethod || 'Cash';
-    const unitCost = (Number(po.quantity) || 0) > 0 ? (Number(po.amount) || 0) / Number(po.quantity) : (Number(po.cost) || 0);
-    const estVal = Math.round(requestedRet * unitCost * 100) / 100;
-    const returnPayload = {
-      poId: po.id,
-      branchId: po.branchId || activeBranchId || undefined,
-      returnQty: requestedRet,
-      ...(returnLines.length ? { returnLines } : {}),
-      settlement: purchaseReturnSettlement,
-      paymentMethod: payMethod
-    };
-
-    // Users WITHOUT purchase.update must seek Manager approval
-    if (!(isAdminUser || canUpdate('purchase'))) {
-      try {
-        const reqRes = await apiFetch('/api/return-requests', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            kind: 'purchase',
-            refId: po.id,
-            partyName: po.supplierName || 'Supplier',
-            summary: `${po.itemName || 'PO Items'} ×${requestedRet} (${purchaseReturnSettlement})`,
-            estimatedAmount: estVal,
-            reason: returnReasonDraft || '',
-            payload: returnPayload
-          })
-        });
-        const reqData = await reqRes.json().catch(() => ({}));
-        if (!reqRes.ok) {
-          alert(reqData.error || 'Could not submit purchase return request.');
-          return;
-        }
-        if (Array.isArray(reqData.returnRequests)) setReturnRequests(reqData.returnRequests);
-        else if (reqData.request) setReturnRequests(prev => [reqData.request, ...(prev || [])]);
-        logAudit('return_request', 'purchase_return', `PO ${po.id} (${requestedRet} unit(s)) · Est ${shopProfile.currency} ${estVal} — awaiting Manager approval`);
-        setPurchaseReturnModalOpen(false);
-        setPurchaseReturnPO(null);
-        setReturnReasonDraft('');
-        alert('Purchase Return request submitted to Manager for approval.');
-      } catch (e) {
-        alert('Network error submitting purchase return request.');
-      }
-      return;
-    }
-
-    try {
-      const res = await apiFetch('/api/purchase-return', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(returnPayload)
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        alert(data.error || 'Purchase return failed.');
+    await runWithLock('po_ret', async () => {
+      const po = purchaseReturnPO;
+      const already = Number(po.returnedQty) || 0;
+      const wasReceived = !!(po.received || (Number(po.receivedQty) || 0) > 0 || ['Received', 'Partially Received', 'Payment', 'Purchase Return'].includes(po.workflowStatus));
+      if (!wasReceived) {
+        alert('A purchase return can only be created after goods have been received.');
         return;
       }
-      if (data.purchaseOrder) {
-        let rh = data.purchaseOrder.returnHistory;
-        try { rh = typeof rh === 'string' ? JSON.parse(rh || '[]') : (rh || []); } catch (_) {}
-        let ph = data.purchaseOrder.paymentHistory;
-        try { ph = typeof ph === 'string' ? JSON.parse(ph || '[]') : (ph || []); } catch (_) {}
-        const merged = { ...data.purchaseOrder, returnHistory: Array.isArray(rh) ? rh : [], paymentHistory: Array.isArray(ph) ? ph : [] };
-        persistPOs((purchaseOrders || []).map(p => p.id === po.id ? merged : p));
-      }
-      if (data.inventory) {
-        setInventory(prev => prev.map(inv => inv.id === data.inventory.id ? { ...inv, ...data.inventory } : inv));
-      }
-      const cashRefund = Number(data.cashRefund) || 0;
-      const supplierCredit = Number(data.supplierCredit) || 0;
-      const retQty = Number(data.retQty) || requestedRet;
-      const returnValue = Number(data.returnValue) || 0;
-      if (cashRefund > 0) {
-        const methodName = (payMethod || 'Cash').split('+')[0].trim().replace(/\s*\(.*\)/, '') || 'Cash';
-        setPaymentMethods(prev => {
-          const next = prev.map(pm => {
-            const n = (pm.name || '').toLowerCase();
-            const m = methodName.toLowerCase();
-            if (n === m || (m.includes('cash') && n === 'cash') || (m.includes('m-pesa') && (n.includes('m-pesa') || n.includes('mpesa'))) || (m.includes('mpesa') && (n.includes('m-pesa') || n.includes('mpesa')))) {
-              return { ...pm, startingBalance: (parseFloat(pm.startingBalance) || 0) + cashRefund };
-            }
-            return pm;
-          });
-          if (!next.some(pm => {
-            const n = (pm.name || '').toLowerCase();
-            const m = methodName.toLowerCase();
-            return n === m || (m.includes('cash') && n === 'cash') || (m.includes('pesa') && n.includes('pesa'));
-          })) {
-            return next.map(pm => pm.name === 'Cash' ? { ...pm, startingBalance: (parseFloat(pm.startingBalance) || 0) + cashRefund } : pm);
+      const recTotal = po.received ? (Number(po.quantity) || 0) : ((Number(po.receivedQty) || 0) > 0 ? Number(po.receivedQty) : (Number(po.quantity) || 0));
+      const maxRet = Math.max(0, recTotal - already);
+      const lines = po._returnLines || [];
+      let requestedRet = 0;
+      const returnLines = [];
+      const lineEntries = Object.entries(purchaseReturnLineQtys || {});
+      if (lineEntries.length && lines.length) {
+        lines.forEach((ln, idx) => {
+          const lineCap = Math.max(0, (Number(ln.receivedQty) || 0) - (Number(ln.returnedQty) || 0));
+          const q = Math.min(lineCap, Math.max(0, parseInt(purchaseReturnLineQtys[idx], 10) || 0));
+          if (q > 0) {
+            requestedRet += q;
+            returnLines.push({ itemId: ln.itemId, itemName: ln.itemName, qty: q, cost: Number(ln.cost) || Number(po.cost) || 0 });
           }
-          return next;
         });
-      }
-      logAudit('purchase_return', 'purchase_orders', `PO ${po.id} · ${retQty} unit(s) · ${shopProfile.currency} ${returnValue} (${purchaseReturnSettlement})`);
-      setPurchaseReturnModalOpen(false);
-      setPurchaseReturnPO(null);
-      const invMsg = 'Inventory reduced (items had been received).';
-      const payMsg = cashRefund > 0 ? ` ${shopProfile.currency} ${cashRefund.toLocaleString()} recorded as a supplier refund to ${payMethod}.` : (purchaseReturnSettlement === 'Supplier Credit Note' ? ` Supplier credit note recorded: ${shopProfile.currency} ${supplierCredit.toLocaleString()}.` : ' Unpaid supplier balance reduced.');
-      alert(`Purchase return processed: ${retQty} unit(s). Purchase amount reduced by ${shopProfile.currency} ${returnValue.toLocaleString()}.${payMsg} ${invMsg}`);
-    } catch (e) {
-      alert('Network error processing purchase return.');
-    }
-  };
-
-  const handleApproveReturnRequest = async (reqItem) => {
-    if (!reqItem || !reqItem.payload) return;
-    try {
-      if (reqItem.kind === 'sale') {
-        const res = await apiFetch('/api/sales-return', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(reqItem.payload)
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) { alert(data.error || 'Sales return execution failed.'); return; }
-        if (data.sale) {
-          let saleItems = data.sale.items;
-          try { saleItems = typeof saleItems === 'string' ? JSON.parse(saleItems || '[]') : (saleItems || []); } catch (_) {}
-          let ph = data.sale.paymentHistory;
-          try { if (typeof ph === 'string') ph = JSON.parse(ph || '[]'); } catch (_) { ph = []; }
-          const merged = { ...data.sale, items: saleItems, paymentHistory: Array.isArray(ph) ? ph : [], type: data.sale.saleType };
-          setSales(prev => prev.map(s => s.id === merged.id ? merged : s));
-        }
-        if (Array.isArray(data.inventory) && data.inventory.length) {
-          setInventory(prev => {
-            const byId = Object.fromEntries(data.inventory.map(r => [r.id, r]));
-            return prev.map(inv => byId[inv.id] ? { ...inv, ...byId[inv.id] } : inv);
-          });
-        }
+      } else if (lineEntries.length) {
+        requestedRet = lineEntries.reduce((s, [, v]) => s + (Math.max(0, parseInt(v, 10) || 0)), 0);
       } else {
+        requestedRet = Math.max(1, parseInt(purchaseReturnQty, 10) || 0);
+      }
+      if (maxRet <= 0) {
+        alert('No remaining received quantity to return on this PO.');
+        return;
+      }
+      if (requestedRet <= 0) {
+        alert('Enter a valid return quantity.');
+        return;
+      }
+      if (requestedRet > maxRet) {
+        alert(`Cannot return ${requestedRet} unit(s). Only ${maxRet} received unit(s) available to return.`);
+        return;
+      }
+      const payMethod = purchaseReturnRefundMethod || po.paymentMethod || 'Cash';
+      const unitCost = (Number(po.quantity) || 0) > 0 ? (Number(po.amount) || 0) / Number(po.quantity) : (Number(po.cost) || 0);
+      const estVal = Math.round(requestedRet * unitCost * 100) / 100;
+      const returnPayload = {
+        poId: po.id,
+        branchId: po.branchId || activeBranchId || undefined,
+        returnQty: requestedRet,
+        ...(returnLines.length ? { returnLines } : {}),
+        settlement: purchaseReturnSettlement,
+        paymentMethod: payMethod
+      };
+
+      if (!(isAdminUser || canUpdate('purchase'))) {
+        try {
+          const reqRes = await apiFetch('/api/return-requests', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              kind: 'purchase',
+              refId: po.id,
+              partyName: po.supplierName || 'Supplier',
+              summary: `${po.itemName || 'PO Items'} ×${requestedRet} (${purchaseReturnSettlement})`,
+              estimatedAmount: estVal,
+              reason: returnReasonDraft || '',
+              payload: returnPayload
+            })
+          });
+          const reqData = await reqRes.json().catch(() => ({}));
+          if (!reqRes.ok) {
+            alert(reqData.error || 'Could not submit purchase return request.');
+            return;
+          }
+          if (Array.isArray(reqData.returnRequests)) setReturnRequests(reqData.returnRequests);
+          else if (reqData.request) setReturnRequests(prev => [reqData.request, ...(prev || [])]);
+          logAudit('return_request', 'purchase_return', `PO ${po.id} (${requestedRet} unit(s)) · Est ${shopProfile.currency} ${estVal} — awaiting Manager approval`);
+          setPurchaseReturnModalOpen(false);
+          setPurchaseReturnPO(null);
+          setReturnReasonDraft('');
+          alert('Purchase Return request submitted to Manager for approval.');
+        } catch (e) {
+          alert('Network error submitting purchase return request.');
+        }
+        return;
+      }
+
+      try {
         const res = await apiFetch('/api/purchase-return', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(reqItem.payload)
+          body: JSON.stringify(returnPayload)
         });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) { alert(data.error || 'Purchase return execution failed.'); return; }
+        if (!res.ok) {
+          alert(data.error || 'Purchase return failed.');
+          return;
+        }
         if (data.purchaseOrder) {
           let rh = data.purchaseOrder.returnHistory;
           try { rh = typeof rh === 'string' ? JSON.parse(rh || '[]') : (rh || []); } catch (_) {}
           let ph = data.purchaseOrder.paymentHistory;
           try { ph = typeof ph === 'string' ? JSON.parse(ph || '[]') : (ph || []); } catch (_) {}
           const merged = { ...data.purchaseOrder, returnHistory: Array.isArray(rh) ? rh : [], paymentHistory: Array.isArray(ph) ? ph : [] };
-          persistPOs((purchaseOrders || []).map(p => p.id === merged.id ? merged : p));
+          persistPOs((purchaseOrders || []).map(p => p.id === po.id ? merged : p));
         }
         if (data.inventory) {
           setInventory(prev => prev.map(inv => inv.id === data.inventory.id ? { ...inv, ...data.inventory } : inv));
         }
+        const cashRefund = Number(data.cashRefund) || 0;
+        const supplierCredit = Number(data.supplierCredit) || 0;
+        const retQty = Number(data.retQty) || requestedRet;
+        const returnValue = Number(data.returnValue) || 0;
+        if (cashRefund > 0) {
+          const methodName = (payMethod || 'Cash').split('+')[0].trim().replace(/\s*\(.*\)/, '') || 'Cash';
+          setPaymentMethods(prev => {
+            const next = prev.map(pm => {
+              const n = (pm.name || '').toLowerCase();
+              const m = methodName.toLowerCase();
+              if (n === m || (m.includes('cash') && n === 'cash') || (m.includes('m-pesa') && (n.includes('m-pesa') || n.includes('mpesa'))) || (m.includes('mpesa') && (n.includes('m-pesa') || n.includes('mpesa')))) {
+                return { ...pm, startingBalance: (parseFloat(pm.startingBalance) || 0) + cashRefund };
+              }
+              return pm;
+            });
+            if (!next.some(pm => {
+              const n = (pm.name || '').toLowerCase();
+              const m = methodName.toLowerCase();
+              return n === m || (m.includes('cash') && n === 'cash') || (m.includes('pesa') && n.includes('pesa'));
+            })) {
+              return next.map(pm => pm.name === 'Cash' ? { ...pm, startingBalance: (parseFloat(pm.startingBalance) || 0) + cashRefund } : pm);
+            }
+            return next;
+          });
+        }
+        logAudit('purchase_return', 'purchase_orders', `PO ${po.id} · ${retQty} unit(s) · ${shopProfile.currency} ${returnValue} (${purchaseReturnSettlement})`);
+        setPurchaseReturnModalOpen(false);
+        setPurchaseReturnPO(null);
+        const invMsg = 'Inventory reduced (items had been received).';
+        const payMsg = cashRefund > 0 ? ` ${shopProfile.currency} ${cashRefund.toLocaleString()} recorded as a supplier refund to ${payMethod}.` : (purchaseReturnSettlement === 'Supplier Credit Note' ? ` Supplier credit note recorded: ${shopProfile.currency} ${supplierCredit.toLocaleString()}.` : ' Unpaid supplier balance reduced.');
+        alert(`Purchase return processed: ${retQty} unit(s). Purchase amount reduced by ${shopProfile.currency} ${returnValue.toLocaleString()}.${payMsg} ${invMsg}`);
+      } catch (e) {
+        alert('Network error processing purchase return.');
       }
-      const updRes = await apiFetch(`/api/return-requests/${reqItem.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'Approved' })
-      });
-      const updData = await updRes.json().catch(() => ({}));
-      if (Array.isArray(updData.returnRequests)) setReturnRequests(updData.returnRequests);
-      else setReturnRequests(prev => (prev || []).map(r => r.id === reqItem.id ? { ...r, status: 'Approved', decidedBy: currentUser?.name || 'Manager', decidedAt: new Date().toISOString() } : r));
-      logAudit('return_approved', `${reqItem.kind}_return`, `Approved ${reqItem.kind} return on ${reqItem.refId} (requested by ${reqItem.requestedBy || 'staff'})`);
-      alert(`${reqItem.kind === 'sale' ? 'Sales' : 'Purchase'} return approved and processed.`);
-    } catch (e) {
-      alert('Network error approving return request.');
-    }
+    });
+  };
+
+  const handleApproveReturnRequest = async (reqItem) => {
+    if (!reqItem || !reqItem.payload) return;
+    await runWithLock(`ret_approve:${reqItem.id}`, async () => {
+      try {
+        if (reqItem.kind === 'sale') {
+          const res = await apiFetch('/api/sales-return', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(reqItem.payload)
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { alert(data.error || 'Sales return execution failed.'); return; }
+          if (data.sale) {
+            let saleItems = data.sale.items;
+            try { saleItems = typeof saleItems === 'string' ? JSON.parse(saleItems || '[]') : (saleItems || []); } catch (_) {}
+            let ph = data.sale.paymentHistory;
+            try { if (typeof ph === 'string') ph = JSON.parse(ph || '[]'); } catch (_) { ph = []; }
+            const merged = { ...data.sale, items: saleItems, paymentHistory: Array.isArray(ph) ? ph : [], type: data.sale.saleType };
+            setSales(prev => prev.map(s => s.id === merged.id ? merged : s));
+          }
+          if (Array.isArray(data.inventory) && data.inventory.length) {
+            setInventory(prev => {
+              const byId = Object.fromEntries(data.inventory.map(r => [r.id, r]));
+              return prev.map(inv => byId[inv.id] ? { ...inv, ...byId[inv.id] } : inv);
+            });
+          }
+        } else {
+          const res = await apiFetch('/api/purchase-return', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(reqItem.payload)
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { alert(data.error || 'Purchase return execution failed.'); return; }
+          if (data.purchaseOrder) {
+            let rh = data.purchaseOrder.returnHistory;
+            try { rh = typeof rh === 'string' ? JSON.parse(rh || '[]') : (rh || []); } catch (_) {}
+            let ph = data.purchaseOrder.paymentHistory;
+            try { ph = typeof ph === 'string' ? JSON.parse(ph || '[]') : (ph || []); } catch (_) {}
+            const merged = { ...data.purchaseOrder, returnHistory: Array.isArray(rh) ? rh : [], paymentHistory: Array.isArray(ph) ? ph : [] };
+            persistPOs((purchaseOrders || []).map(p => p.id === merged.id ? merged : p));
+          }
+          if (data.inventory) {
+            setInventory(prev => prev.map(inv => inv.id === data.inventory.id ? { ...inv, ...data.inventory } : inv));
+          }
+        }
+        const updRes = await apiFetch(`/api/return-requests/${reqItem.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'Approved' })
+        });
+        const updData = await updRes.json().catch(() => ({}));
+        if (Array.isArray(updData.returnRequests)) setReturnRequests(updData.returnRequests);
+        else setReturnRequests(prev => (prev || []).map(r => r.id === reqItem.id ? { ...r, status: 'Approved', decidedBy: currentUser?.name || 'Manager', decidedAt: new Date().toISOString() } : r));
+        logAudit('return_approved', `${reqItem.kind}_return`, `Approved ${reqItem.kind} return on ${reqItem.refId} (requested by ${reqItem.requestedBy || 'staff'})`);
+        alert(`${reqItem.kind === 'sale' ? 'Sales' : 'Purchase'} return approved and processed.`);
+      } catch (e) {
+        alert('Network error approving return request.');
+      }
+    });
   };
 
   const handleRejectReturnRequest = async (reqItem) => {
     if (!reqItem) return;
-    const note = window.prompt('Optional rejection note for staff:', '') ?? null;
-    if (note === null) return;
-    try {
-      const updRes = await apiFetch(`/api/return-requests/${reqItem.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'Rejected', decisionNote: note })
-      });
-      const updData = await updRes.json().catch(() => ({}));
-      if (Array.isArray(updData.returnRequests)) setReturnRequests(updData.returnRequests);
-      else setReturnRequests(prev => (prev || []).map(r => r.id === reqItem.id ? { ...r, status: 'Rejected', decisionNote: note, decidedBy: currentUser?.name || 'Manager', decidedAt: new Date().toISOString() } : r));
-      logAudit('return_rejected', `${reqItem.kind}_return`, `Rejected ${reqItem.kind} return on ${reqItem.refId}${note ? ': ' + note : ''}`);
-    } catch (e) {
-      alert('Network error rejecting return request.');
-    }
+    await runWithLock(`ret_reject:${reqItem.id}`, async () => {
+      const note = window.prompt('Optional rejection note for staff:', '') ?? null;
+      if (note === null) return;
+      try {
+        const updRes = await apiFetch(`/api/return-requests/${reqItem.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'Rejected', decisionNote: note })
+        });
+        const updData = await updRes.json().catch(() => ({}));
+        if (Array.isArray(updData.returnRequests)) setReturnRequests(updData.returnRequests);
+        else setReturnRequests(prev => (prev || []).map(r => r.id === reqItem.id ? { ...r, status: 'Rejected', decisionNote: note, decidedBy: currentUser?.name || 'Manager', decidedAt: new Date().toISOString() } : r));
+        logAudit('return_rejected', `${reqItem.kind}_return`, `Rejected ${reqItem.kind} return on ${reqItem.refId}${note ? ': ' + note : ''}`);
+      } catch (e) {
+        alert('Network error rejecting return request.');
+      }
+    });
   };
 
   const handleSaveHrSettings = async () => {
-    try {
-      const res = await apiFetch('/api/hr-settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(hrSettings) });
-      if (res.ok) alert('HR settings saved.');
-      else alert('HR settings kept in this session.');
-    } catch (e) {
-      console.warn(e);
-      alert('HR settings kept in this session.');
-    }
+    await runWithLock('hr_settings', async () => {
+      try {
+        const res = await apiFetch('/api/hr-settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(hrSettings) });
+        if (res.ok) alert('HR settings saved.');
+        else alert('HR settings kept in this session.');
+      } catch (e) {
+        console.warn(e);
+        alert('HR settings kept in this session.');
+      }
+    });
   };
 
   const handleSaveTaxSettings = async () => {
-    setPosApplyTax(!!taxSettings.salesTaxEnabled);
-    setPoApplyTax(!!taxSettings.purchaseTaxEnabled);
-    setExpenseApplyTax(!!(taxSettings.expenseTaxEnabled ?? taxSettings.purchaseTaxEnabled));
-    setPosTaxInclusive(!!taxSettings.taxInclusive);
-    setPoTaxInclusive(!!taxSettings.taxInclusive);
-    setExpenseTaxInclusive(!!taxSettings.taxInclusive);
-    try {
-      const res = await apiFetch('/api/tax-settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(taxSettings) });
-      if (res.ok) alert('Tax settings saved. POS / Purchase / Expense tax toggles updated.');
-      else alert('Tax settings kept locally. Enable toggles on POS, Purchase, and Expense as needed.');
-    } catch (e) {
-      console.warn(e);
-      alert('Tax settings kept locally. Enable toggles on POS, Purchase, and Expense as needed.');
-    }
+    await runWithLock('tax_settings', async () => {
+      setPosApplyTax(!!taxSettings.salesTaxEnabled);
+      setPoApplyTax(!!taxSettings.purchaseTaxEnabled);
+      setExpenseApplyTax(!!(taxSettings.expenseTaxEnabled ?? taxSettings.purchaseTaxEnabled));
+      setPosTaxInclusive(!!taxSettings.taxInclusive);
+      setPoTaxInclusive(!!taxSettings.taxInclusive);
+      setExpenseTaxInclusive(!!taxSettings.taxInclusive);
+      try {
+        const res = await apiFetch('/api/tax-settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(taxSettings) });
+        if (res.ok) alert('Tax settings saved. POS / Purchase / Expense tax toggles updated.');
+        else alert('Tax settings kept locally. Enable toggles on POS, Purchase, and Expense as needed.');
+      } catch (e) {
+        console.warn(e);
+        alert('Tax settings kept locally. Enable toggles on POS, Purchase, and Expense as needed.');
+      }
+    });
   };
+
+  useEffect(() => {
+    setFinReportData(null);
+    if (finReportTab !== 'branch-profitability') {
+      const target = strictActiveBranchId || (accessibleBranches[0]?.id || branches[0]?.id || '');
+      if (target) setFinBranchId(String(target));
+    } else if (!finBranchId || (!hasViewAllBranchesPriv && finBranchId === 'all')) {
+      const target = showAllBranchesScope ? 'all' : (strictActiveBranchId || accessibleBranches[0]?.id || '');
+      if (target) setFinBranchId(String(target));
+    }
+  }, [currentBranchId, strictActiveBranchId, finReportTab, hasViewAllBranchesPriv, showAllBranchesScope, accessibleBranches.length]);
 
 
   useEffect(() => {
@@ -4275,7 +4410,7 @@ export default function App() {
     })();
   }, [isLoggedIn, tenantInfo?.isSuperAdmin]);
 
-    const handleLogin = async (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
     if (!loginUsername.trim()) {
       alert('Please enter your username.');
@@ -4285,24 +4420,27 @@ export default function App() {
       alert('Please enter your PIN.');
       return;
     }
-    try {
-      const res = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: loginUsername.trim(), pin: loginPin })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        alert(data.error || 'Login failed.');
-        return;
-      }
-      const foundUser = data.user || {};
-      setAuthToken(data.token || '');
-      try { localStorage.setItem('erp_auth_token', data.token || ''); } catch (e) {}
-      const privFromLogin = data.privileges && typeof data.privileges === 'object' ? data.privileges : null;
-      setLoginPrivileges(privFromLogin);
-      try { localStorage.setItem('erp_login_privileges', JSON.stringify(privFromLogin)); } catch (e) {}
-      setCurrentUser(foundUser);
+    await runWithLock('auth_login', async () => {
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: loginUsername.trim(), pin: loginPin })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          alert(data.error || 'Login failed.');
+          return;
+        }
+        logoutInFlightRef.current = false;
+        const foundUser = data.user || {};
+        setAuthToken(data.token || '');
+        try { localStorage.setItem('erp_auth_token', data.token || ''); } catch (e) {}
+        setNeedsBusinessWizard(Boolean(data.needsBusinessWizard));
+        const privFromLogin = data.privileges && typeof data.privileges === 'object' ? data.privileges : null;
+        setLoginPrivileges(privFromLogin);
+        try { localStorage.setItem('erp_login_privileges', JSON.stringify(privFromLogin)); } catch (e) {}
+        setCurrentUser(foundUser);
       // Auto-assign branch for single-location users on login
       try {
         const isAdm = (foundUser.role || '').toLowerCase() === 'admin' || !!data.isSuperAdmin;
@@ -4500,6 +4638,9 @@ export default function App() {
               }
             } catch (e) {}
           }
+          if (payload && typeof payload.needsBusinessWizard === 'boolean') {
+            setNeedsBusinessWizard(Boolean(payload.needsBusinessWizard));
+          }
           if (payload && Array.isArray(payload.branches)) {
             setBranches(payload.branches);
             if (payload.maxBranches) setMaxBranches(payload.maxBranches);
@@ -4534,11 +4675,11 @@ export default function App() {
         } catch (e) {}
         finally { clearTimeout(hydrateTimer); setAppHydrating(false); }
       })();
-    } catch (err) {
-      // Offline / API down: fallback local login (legacy) so app still opens offline
-      alert('Server unreachable. Secure login requires the API (hashed PINs cannot be verified offline). Check your connection and try again.');
-      return;
-    }
+      } catch (err) {
+        alert('Server unreachable. Secure login requires the API (hashed PINs cannot be verified offline). Check your connection and try again.');
+        return;
+      }
+    });
   };
 
   if (!isLoggedIn) {
@@ -4599,7 +4740,7 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              <button type="submit" className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-400 text-white font-bold rounded-xl text-sm transition-colors shadow-lg shadow-emerald-500/20">Sign in</button>
+              <button type="submit" disabled={isBusy('auth_login')} className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 disabled:cursor-not-allowed text-white font-bold rounded-xl text-sm transition-colors shadow-lg shadow-emerald-500/20">{isBusy('auth_login') ? 'Signing in…' : 'Sign in'}</button>
             </form>
           )}
 
@@ -4608,14 +4749,16 @@ export default function App() {
               e.preventDefault();
               if (!signupForm.email || !String(signupForm.email).includes('@')) return alert('A valid email is required');
               if (!signupForm.phone || String(signupForm.phone).trim().length < 7) return alert('Phone number is required');
-              try {
-                const res = await fetch('/api/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(signupForm) });
-                const data = await res.json().catch(() => ({}));
-                if (!res.ok) { alert(data.error || 'Signup failed'); return; }
-                alert((data.message || 'Shop submitted.') + '\n\nYou will be contacted before your business is approved. Please wait for confirmation from the platform operator.');
-                setLoginUsername(signupForm.adminName);
-                setAuthMode('login');
-              } catch (err) { alert('Network error'); }
+              await runWithLock('auth_signup', async () => {
+                try {
+                  const res = await fetch('/api/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(signupForm) });
+                  const data = await res.json().catch(() => ({}));
+                  if (!res.ok) { alert(data.error || 'Signup failed'); return; }
+                  alert((data.message || 'Shop submitted.') + '\n\nYou will be contacted before your business is approved. Please wait for confirmation from the platform operator.');
+                  setLoginUsername(signupForm.adminName);
+                  setAuthMode('login');
+                } catch (err) { alert('Network error'); }
+              });
             }} className="space-y-3">
               <input required placeholder="Shop / business name" value={signupForm.shopName} onChange={e => setSignupForm({ ...signupForm, shopName: e.target.value })} className="w-full bg-slate-950/80 border border-slate-700 rounded-xl py-2.5 px-3 text-sm text-white placeholder:text-slate-500" />
               <input required placeholder="Main location / branch name" value={signupForm.locationName} onChange={e => setSignupForm({ ...signupForm, locationName: e.target.value })} className="w-full bg-slate-950/80 border border-slate-700 rounded-xl py-2.5 px-3 text-sm text-white placeholder:text-slate-500" />
@@ -4629,36 +4772,40 @@ export default function App() {
                 <option value="premium">Premium (100 users)</option>
               </SearchableSelect>
               <p className="text-[10px] text-slate-500">Your shop will be reviewed by the platform operator before it is activated.</p>
-              <button type="submit" className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-400 text-white font-bold rounded-xl text-sm">Create Shop & Continue</button>
+              <button type="submit" disabled={isBusy('auth_signup')} className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 disabled:cursor-not-allowed text-white font-bold rounded-xl text-sm">{isBusy('auth_signup') ? 'Creating shop…' : 'Create Shop & Continue'}</button>
             </form>
           )}
 
           {authMode === 'super' && (
             <form onSubmit={async e => {
               e.preventDefault();
-              try {
-                const res = await fetch('/api/super-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: loginUsername.trim(), pin: loginPin }) });
-                const data = await res.json().catch(() => ({}));
-                if (!res.ok) { alert(data.error || 'Super login failed'); return; }
-                setAuthToken(data.token || '');
-                try { localStorage.setItem('erp_auth_token', data.token || ''); } catch (e) {}
-                setCurrentUser(data.user);
-                setTenantInfo({ id: 'platform', name: 'Platform', isSuperAdmin: true });
-                try { localStorage.setItem('erp_tenant', JSON.stringify({ id: 'platform', isSuperAdmin: true })); } catch (e) {}
-                setIsLoggedIn(true);
-                setSessionNotice('');
-                localStorage.setItem('erp_current_user', JSON.stringify(data.user));
-                localStorage.setItem('erp_login_time', Date.now().toString());
+              await runWithLock('auth_super', async () => {
                 try {
-                  const hdr = { Authorization: 'Bearer ' + (data.token || '') };
-                  const tr = await fetch('/api/super-tenants', { headers: hdr });
-                  if (tr.ok) { const td = await tr.json(); setSuperTenants(td.tenants || []); setSuperPlans(td.plans || []); setPlatformKpis(td.kpis || null); }
-                  const pr = await fetch('/api/super-payments', { headers: hdr });
-                  if (pr.ok) { const pd = await pr.json(); setSuperPayments(pd.payments || []); }
-                  const pf = await fetch('/api/super-profile', { headers: hdr });
-                  if (pf.ok) { const pfd = await pf.json(); setSuperProfile({ username: pfd.profile?.username || data.user?.name || '', displayName: pfd.profile?.displayName || data.user?.name || '' }); }
-                } catch (err) { /* non-fatal */ }
-              } catch (err) { alert('Network error'); }
+                  const res = await fetch('/api/super-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: loginUsername.trim(), pin: loginPin }) });
+                  const data = await res.json().catch(() => ({}));
+                  if (!res.ok) { alert(data.error || 'Super login failed'); return; }
+                  logoutInFlightRef.current = false;
+                  setNeedsBusinessWizard(false);
+                  setAuthToken(data.token || '');
+                  try { localStorage.setItem('erp_auth_token', data.token || ''); } catch (e) {}
+                  setCurrentUser(data.user);
+                  setTenantInfo({ id: 'platform', name: 'Platform', isSuperAdmin: true });
+                  try { localStorage.setItem('erp_tenant', JSON.stringify({ id: 'platform', isSuperAdmin: true })); } catch (e) {}
+                  setIsLoggedIn(true);
+                  setSessionNotice('');
+                  localStorage.setItem('erp_current_user', JSON.stringify(data.user));
+                  localStorage.setItem('erp_login_time', Date.now().toString());
+                  try {
+                    const hdr = { Authorization: 'Bearer ' + (data.token || '') };
+                    const tr = await fetch('/api/super-tenants', { headers: hdr });
+                    if (tr.ok) { const td = await tr.json(); setSuperTenants(td.tenants || []); setSuperPlans(td.plans || []); setPlatformKpis(td.kpis || null); }
+                    const pr = await fetch('/api/super-payments', { headers: hdr });
+                    if (pr.ok) { const pd = await pr.json(); setSuperPayments(pd.payments || []); }
+                    const pf = await fetch('/api/super-profile', { headers: hdr });
+                    if (pf.ok) { const pfd = await pf.json(); setSuperProfile({ username: pfd.profile?.username || data.user?.name || '', displayName: pfd.profile?.displayName || data.user?.name || '' }); }
+                  } catch (err) { /* non-fatal */ }
+                } catch (err) { alert('Network error'); }
+              });
             }} className="space-y-4">
               <div>
                 <label className="text-xs text-slate-400 block mb-1.5">Username</label>
@@ -4668,7 +4815,7 @@ export default function App() {
                 <label className="text-xs text-slate-400 block mb-1.5">Password / PIN</label>
                 <input type="password" value={loginPin} onChange={e => setLoginPin(e.target.value)} placeholder="••••••••" required className="w-full bg-slate-950/80 border border-slate-700 rounded-xl py-3 px-3 text-sm text-amber-400 tracking-widest focus:outline-none focus:border-amber-500" />
               </div>
-              <button type="submit" className="w-full py-3.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-sm">Enter platform console</button>
+              <button type="submit" disabled={isBusy('auth_super')} className="w-full py-3.5 bg-amber-500 hover:bg-amber-400 disabled:bg-slate-700 disabled:cursor-not-allowed text-slate-950 font-bold rounded-xl text-sm">{isBusy('auth_super') ? 'Signing in…' : 'Enter platform console'}</button>
               <button type="button" onClick={() => setAuthMode('login')} className="w-full text-center text-xs text-slate-400 hover:text-slate-200 pt-1">← Back to shop login</button>
             </form>
           )}
@@ -4779,20 +4926,6 @@ export default function App() {
   const canUpdate = (tab) => isAdminUser || !!(privileges[tab] && privileges[tab].update);
   const canDelete = (tab) => isAdminUser || !!(privileges[tab] && privileges[tab].delete);
 
-  // Location privileges: list of branch IDs the role may use (empty = all locations)
-  const allowedBranchIds = earlyAllowedBranchIds;
-  const accessibleBranches = (() => {
-    const list = (branches || []).filter(b => !allowedBranchIds || allowedBranchIds.includes(String(b.id)));
-    if (isRestrictedToSingleLocation && list.length > 1) {
-      if (allowedBranchIds && allowedBranchIds.length) {
-        const found = list.find(b => allowedBranchIds.includes(String(b.id)));
-        if (found) return [found];
-      }
-      const def = list.find(b => b.isDefault) || list[0];
-      return def ? [def] : [];
-    }
-    return list;
-  })();
   const canSeeTransfer = hasMultiLocationAccess && (branches || []).length > 1;
   const canSeeStockMovements = hasMultiLocationAccess || canUpdate('purchase') || isAdminUser;
   const canAccessBranch = (bid) => {
@@ -5512,13 +5645,15 @@ export default function App() {
                   {(superPlans.length ? superPlans : [{ id: 'starter', label: 'Starter' }, { id: 'business', label: 'Business' }, { id: 'premium', label: 'Premium' }]).map(p => <option key={p.id} value={p.id}>{p.label || p.id}</option>)}
                 </SearchableSelect>
                 <input placeholder="Owner email" value={newTenantForm.ownerEmail} onChange={e => setNewTenantForm({ ...newTenantForm, ownerEmail: e.target.value })} className="bg-slate-950 border border-slate-700 rounded-lg p-2 text-white" />
-                <button type="button" onClick={async () => {
+                <button type="button" disabled={isBusy('sup_tenant_create')} onClick={async () => {
                   if (!newTenantForm.name.trim()) return alert('Shop name required');
-                  const res = await apiFetch('/api/super-tenants', { method: 'POST', body: JSON.stringify({ ...newTenantForm, trialDays: 14 }) });
-                  if (!res.ok) { const d = await res.json().catch(() => ({})); return alert(d.error || 'Failed'); }
-                  setNewTenantForm({ name: '', plan: 'starter', ownerEmail: '' });
-                  const r2 = await apiFetch('/api/super-tenants'); if (r2.ok) { const x = await r2.json(); setSuperTenants(x.tenants || []); setSuperPlans(x.plans || []); setPlatformKpis(x.kpis || null); }
-                }} className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg p-2">Create shop (14d trial)</button>
+                  await runWithLock('sup_tenant_create', async () => {
+                    const res = await apiFetch('/api/super-tenants', { method: 'POST', body: JSON.stringify({ ...newTenantForm, trialDays: 14 }) });
+                    if (!res.ok) { const d = await res.json().catch(() => ({})); return alert(d.error || 'Failed'); }
+                    setNewTenantForm({ name: '', plan: 'starter', ownerEmail: '' });
+                    const r2 = await apiFetch('/api/super-tenants'); if (r2.ok) { const x = await r2.json(); setSuperTenants(x.tenants || []); setSuperPlans(x.plans || []); setPlatformKpis(x.kpis || null); }
+                  });
+                }} className="bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 disabled:cursor-not-allowed text-slate-950 font-bold rounded-lg p-2">{isBusy('sup_tenant_create') ? 'Creating…' : 'Create shop (14d trial)'}</button>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -5572,35 +5707,39 @@ export default function App() {
                           <span className="text-[10px] text-slate-400">{t.nextDueAt ? `Next: ${new Date(t.nextDueAt).toLocaleDateString()}` : (t.trialEndsAt ? `Trial: ${new Date(t.trialEndsAt).toLocaleDateString()}` : '—')}</span>
                         </td>
                         <td className="p-2.5 space-y-1" onClick={e => e.stopPropagation()}>
-                          <button type="button" className="block w-full px-2 py-1 bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 rounded text-[10px] font-bold" onClick={async () => {
+                          <button type="button" disabled={isBusy(`sup_open:${t.id}`)} className="block w-full px-2 py-1 bg-sky-500/20 hover:bg-sky-500/30 disabled:opacity-50 text-sky-300 rounded text-[10px] font-bold" onClick={async () => {
                             if (!confirm('Open this shop as support (2h session)?')) return;
-                            const res = await apiFetch('/api/super-impersonate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId: t.id }) });
-                            const d = await res.json().catch(() => ({}));
-                            if (!res.ok) return alert(d.error || 'Failed');
-                            try {
-                              localStorage.setItem('erp_auth_token', d.token);
-                              localStorage.setItem('erp_current_user', JSON.stringify(d.user));
-                              localStorage.setItem('erp_tenant', JSON.stringify(d.tenant));
-                              if (d.privileges) localStorage.setItem('erp_login_privileges', JSON.stringify(d.privileges));
-                            } catch (e) {}
-                            window.location.reload();
-                          }}>Open as shop</button>
+                            await runWithLock(`sup_open:${t.id}`, async () => {
+                              const res = await apiFetch('/api/super-impersonate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId: t.id }) });
+                              const d = await res.json().catch(() => ({}));
+                              if (!res.ok) return alert(d.error || 'Failed');
+                              try {
+                                localStorage.setItem('erp_auth_token', d.token);
+                                localStorage.setItem('erp_current_user', JSON.stringify(d.user));
+                                localStorage.setItem('erp_tenant', JSON.stringify(d.tenant));
+                                if (d.privileges) localStorage.setItem('erp_login_privileges', JSON.stringify(d.privileges));
+                              } catch (e) {}
+                              window.location.reload();
+                            });
+                          }}>{isBusy(`sup_open:${t.id}`) ? 'Opening…' : 'Open as shop'}</button>
                           {t.status === 'suspended' ? (
-                            <button type="button" className="block w-full px-2 py-1 bg-emerald-500/20 text-emerald-400 rounded text-[10px] font-bold" onClick={async () => { await apiFetch('/api/super-tenants/' + t.id, { method: 'PUT', body: JSON.stringify({ status: 'active' }) }); setSuperTenants(superTenants.map(x => x.id === t.id ? { ...x, status: 'active' } : x)); }}>Activate</button>
+                            <button type="button" disabled={isBusy(`sup_status:${t.id}`)} className="block w-full px-2 py-1 bg-emerald-500/20 disabled:opacity-50 text-emerald-400 rounded text-[10px] font-bold" onClick={() => runWithLock(`sup_status:${t.id}`, async () => { await apiFetch('/api/super-tenants/' + t.id, { method: 'PUT', body: JSON.stringify({ status: 'active' }) }); setSuperTenants(superTenants.map(x => x.id === t.id ? { ...x, status: 'active' } : x)); })}>{isBusy(`sup_status:${t.id}`) ? 'Updating…' : 'Activate'}</button>
                           ) : (
-                            <button type="button" className="block w-full px-2 py-1 bg-rose-500/20 text-rose-300 rounded text-[10px] font-bold" onClick={async () => { if (!confirm('Suspend this shop? Users cannot log in.')) return; await apiFetch('/api/super-tenants/' + t.id, { method: 'PUT', body: JSON.stringify({ status: 'suspended' }) }); setSuperTenants(superTenants.map(x => x.id === t.id ? { ...x, status: 'suspended' } : x)); }}>Suspend</button>
+                            <button type="button" disabled={isBusy(`sup_status:${t.id}`)} className="block w-full px-2 py-1 bg-rose-500/20 disabled:opacity-50 text-rose-300 rounded text-[10px] font-bold" onClick={async () => { if (!confirm('Suspend this shop? Users cannot log in.')) return; await runWithLock(`sup_status:${t.id}`, async () => { await apiFetch('/api/super-tenants/' + t.id, { method: 'PUT', body: JSON.stringify({ status: 'suspended' }) }); setSuperTenants(superTenants.map(x => x.id === t.id ? { ...x, status: 'suspended' } : x)); }); }}>{isBusy(`sup_status:${t.id}`) ? 'Updating…' : 'Suspend'}</button>
                           )}
                           {t.id !== 'tenant-default' && (
-                            <button type="button" className="block w-full px-2 py-1 bg-red-600/30 text-red-300 rounded text-[10px] font-bold" onClick={async () => {
+                            <button type="button" disabled={isBusy(`sup_del:${t.id}`)} className="block w-full px-2 py-1 bg-red-600/30 disabled:opacity-50 text-red-300 rounded text-[10px] font-bold" onClick={async () => {
                               if (!confirm('PERMANENTLY delete this shop and ALL its data (users, sales, inventory, etc.)? This cannot be undone.')) return;
                               if (!confirm('Type-confirm: delete shop "' + (t.name || t.id) + '" and purge every related record?')) return;
-                              const res = await apiFetch('/api/super-tenants/' + t.id, { method: 'DELETE', body: JSON.stringify({ hard: true }) });
-                              const d = await res.json().catch(() => ({}));
-                              if (!res.ok) return alert(d.error || 'Delete failed');
-                              setSuperTenants(superTenants.filter(x => x.id !== t.id));
-                              setSelectedPlatformShop(null);
-                              alert('Shop and all related records deleted.');
-                            }}>Delete shop</button>
+                              await runWithLock(`sup_del:${t.id}`, async () => {
+                                const res = await apiFetch('/api/super-tenants/' + t.id, { method: 'DELETE', body: JSON.stringify({ hard: true }) });
+                                const d = await res.json().catch(() => ({}));
+                                if (!res.ok) return alert(d.error || 'Delete failed');
+                                setSuperTenants(superTenants.filter(x => x.id !== t.id));
+                                setSelectedPlatformShop(null);
+                                alert('Shop and all related records deleted.');
+                              });
+                            }}>{isBusy(`sup_del:${t.id}`) ? 'Deleting…' : 'Delete shop'}</button>
                           )}
                         </td>
                       </tr>
@@ -5977,7 +6116,7 @@ export default function App() {
               </div>
             )}
             <button type="button" onClick={() => { setProfileNameDraft(currentUser?.name || ''); setProfileImage(currentUser?.photo || ''); setUserProfileModalOpen(true); }} className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-lg px-2.5 py-1.5 text-left" title="Open user profile">
-              {profileImage || (currentUser?.id && localStorage.getItem(`erp_user_photo_${currentUser.id}`)) ? <img src={profileImage || localStorage.getItem(`erp_user_photo_${currentUser?.id}`)} alt="User profile" className="w-8 h-8 rounded-full object-cover border border-slate-700" /> : <span className="w-8 h-8 rounded-full bg-emerald-500 text-slate-950 flex items-center justify-center font-bold text-xs">{(currentUser?.name || 'U').trim().charAt(0).toUpperCase()}</span>}
+              {profileImage || (currentUser?.id && localStorage.getItem(`erp_user_photo_${currentUser.id}`)) ? <img loading="lazy" src={profileImage || localStorage.getItem(`erp_user_photo_${currentUser?.id}`)} alt="User profile" className="w-8 h-8 rounded-full object-cover border border-slate-700" /> : <span className="w-8 h-8 rounded-full bg-emerald-500 text-slate-950 flex items-center justify-center font-bold text-xs">{(currentUser?.name || 'U').trim().charAt(0).toUpperCase()}</span>}
               <span className="text-xs"><span className="block text-white font-semibold">{(currentUser?.name || 'User').trim().split(/\s+/)[0]}</span><span className="text-emerald-400 font-bold">{currentUser?.role}</span></span>
             </button>
             <button onClick={handleLogout} className="bg-slate-900 hover:bg-red-500/20 hover:text-red-400 border border-slate-800 px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors" title="Log out"><LogOut className="w-3.5 h-3.5" /> Logout</button>
@@ -6190,10 +6329,10 @@ export default function App() {
                           {lr.reason && <p className="text-[11px] text-slate-300 italic bg-slate-950/60 p-2 rounded border border-slate-800">"{lr.reason}"</p>}
                         </div>
                         <div className="flex items-center gap-2 pt-2 border-t border-slate-800" onClick={e => e.stopPropagation()}>
-                          <button type="button" onClick={(e) => { e.stopPropagation(); handleLeaveAction(lr, 'Approved'); }} className="flex-1 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs transition-colors">
-                            Approve
+                          <button type="button" disabled={isBusy(`leave_act:${lr.id}`)} onClick={(e) => { e.stopPropagation(); handleLeaveAction(lr, 'Approved'); }} className="flex-1 py-1.5 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-bold rounded-lg text-xs transition-colors">
+                            {isBusy(`leave_act:${lr.id}`) ? 'Processing…' : 'Approve'}
                           </button>
-                          <button type="button" onClick={(e) => { e.stopPropagation(); handleLeaveAction(lr, 'Rejected'); }} className="flex-1 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-400 border border-red-500/30 font-bold rounded-lg text-xs transition-colors">
+                          <button type="button" disabled={isBusy(`leave_act:${lr.id}`)} onClick={(e) => { e.stopPropagation(); handleLeaveAction(lr, 'Rejected'); }} className="flex-1 py-1.5 bg-red-500/15 hover:bg-red-500/25 disabled:opacity-50 disabled:cursor-not-allowed text-red-400 border border-red-500/30 font-bold rounded-lg text-xs transition-colors">
                             Reject
                           </button>
                         </div>
@@ -6216,26 +6355,28 @@ export default function App() {
                             <p className="text-[10px] text-slate-400">Created {po.date || '—'} by {po.createdBy || 'Staff'}</p>
                           </div>
                           <div className="flex items-center gap-2 pt-2 border-t border-slate-800" onClick={e => e.stopPropagation()}>
-                            <button type="button" onClick={async (e) => {
+                            <button type="button" disabled={isBusy(`po_approve:${po.id}`)} onClick={async (e) => {
                               e.stopPropagation();
-                              const amt = parseFloat(po.amount) || 0;
-                              const paid = parseFloat(po.paidAmount) || 0;
-                              const updated = {
-                                ...po,
-                                workflowStatus: 'Approved',
-                                bookedPayable: amt,
-                                paidAmount: paid,
-                                balanceDue: Math.max(0, amt - paid),
-                                paymentStatus: paid <= 0 ? 'Unpaid' : (paid >= amt ? 'Paid' : 'Partial'),
-                                received: false
-                              };
-                              const ok = await upsertPO(updated);
-                              if (ok) {
-                                logAudit('approve', 'purchase_orders', `Approved PO ${po.id} from Dashboard (${shopProfile.currency} ${amt.toLocaleString()})`);
-                                alert(`Purchase Order ${po.id} approved successfully.`);
-                              }
-                            }} className="flex-1 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs transition-colors">
-                              Approve
+                              await runWithLock(`po_approve:${po.id}`, async () => {
+                                const amt = parseFloat(po.amount) || 0;
+                                const paid = parseFloat(po.paidAmount) || 0;
+                                const updated = {
+                                  ...po,
+                                  workflowStatus: 'Approved',
+                                  bookedPayable: amt,
+                                  paidAmount: paid,
+                                  balanceDue: Math.max(0, amt - paid),
+                                  paymentStatus: paid <= 0 ? 'Unpaid' : (paid >= amt ? 'Paid' : 'Partial'),
+                                  received: false
+                                };
+                                const ok = await upsertPO(updated);
+                                if (ok) {
+                                  logAudit('approve', 'purchase_orders', `Approved PO ${po.id} from Dashboard (${shopProfile.currency} ${amt.toLocaleString()})`);
+                                  alert(`Purchase Order ${po.id} approved successfully.`);
+                                }
+                              });
+                            }} className="flex-1 py-1.5 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-bold rounded-lg text-xs transition-colors">
+                              {isBusy(`po_approve:${po.id}`) ? 'Approving…' : 'Approve'}
                             </button>
                             <button type="button" onClick={(e) => {
                               e.stopPropagation();
@@ -6273,11 +6414,11 @@ export default function App() {
                           {rr.reason && <p className="text-[11px] text-slate-300 italic bg-slate-950/60 p-2 rounded border border-slate-800">"{rr.reason}"</p>}
                         </div>
                         <div className="flex items-center gap-2 pt-2 border-t border-slate-800" onClick={e => e.stopPropagation()}>
-                          <button type="button" onClick={(e) => { e.stopPropagation(); handleApproveReturnRequest(rr); }} className="flex-1 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs transition-colors">
-                            Approve
+                          <button type="button" disabled={isBusy(`ret_approve:${rr.id}`) || isBusy(`ret_reject:${rr.id}`)} onClick={(e) => { e.stopPropagation(); handleApproveReturnRequest(rr); }} className="flex-1 py-1.5 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-bold rounded-lg text-xs transition-colors">
+                            {isBusy(`ret_approve:${rr.id}`) ? 'Approving…' : 'Approve'}
                           </button>
-                          <button type="button" onClick={(e) => { e.stopPropagation(); handleRejectReturnRequest(rr); }} className="flex-1 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-400 border border-red-500/30 font-bold rounded-lg text-xs transition-colors">
-                            Reject
+                          <button type="button" disabled={isBusy(`ret_approve:${rr.id}`) || isBusy(`ret_reject:${rr.id}`)} onClick={(e) => { e.stopPropagation(); handleRejectReturnRequest(rr); }} className="flex-1 py-1.5 bg-red-500/15 hover:bg-red-500/25 disabled:opacity-50 disabled:cursor-not-allowed text-red-400 border border-red-500/30 font-bold rounded-lg text-xs transition-colors">
+                            {isBusy(`ret_reject:${rr.id}`) ? 'Rejecting…' : 'Reject'}
                           </button>
                         </div>
                       </div>
@@ -6571,8 +6712,11 @@ export default function App() {
             <div className="space-y-4">
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
                 <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-2">
-                  <div className="flex justify-between items-center">
-                    <h4 className="text-xs font-bold text-white">Period Compare</h4>
+                  <div className="flex justify-between items-center gap-2">
+                    <div>
+                      <h4 className="text-xs font-bold text-white">Period Compare</h4>
+                      <p className="text-[10px] text-slate-500">{showAllBranchesScope ? 'All locations' : ((branches || []).find(b => String(b.id) === String(strictActiveBranchId))?.name || 'Selected branch')}</p>
+                    </div>
                     <SearchableSelect value={dashboardCompareMode} onChange={e => setDashboardCompareMode(e.target.value)} className="bg-slate-900 border border-slate-700 rounded text-[10px] text-white px-1 py-0.5">
                       <option value="last_month">vs Last Month</option>
                       <option value="last_year">vs Last Year</option>
@@ -6583,7 +6727,10 @@ export default function App() {
                   <p className="text-[10px] text-slate-400">Change: <span className={`font-bold ${currentMonthSalesTotal >= compareSalesTotal ? 'text-emerald-400' : 'text-red-400'}`}>{compareSalesTotal > 0 ? (((currentMonthSalesTotal - compareSalesTotal) / compareSalesTotal) * 100).toFixed(1) : '—'}%</span></p>
                 </div>
                 <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-2">
-                  <h4 className="text-xs font-bold text-white">Staff Targets (This Month)</h4>
+                  <div className="flex justify-between items-center">
+                    <h4 className="text-xs font-bold text-white">Staff Targets (This Month)</h4>
+                    <span className="text-[10px] text-slate-500">{showAllBranchesScope ? 'All locations' : ((branches || []).find(b => String(b.id) === String(strictActiveBranchId))?.name || '')}</span>
+                  </div>
                   <div className="max-h-28 overflow-y-auto space-y-1">
                     {Object.keys(staffSalesThisMonth).length === 0 ? <p className="text-[10px] text-slate-500">No sales yet.</p> :
                       Object.entries(staffSalesThisMonth).map(([who, amt]) => {
@@ -6813,7 +6960,7 @@ export default function App() {
                             <div key={item.id} onClick={() => addToCart(item)} className="bg-slate-900 border border-slate-700 rounded-lg p-2.5 cursor-pointer hover:border-emerald-500 flex flex-col justify-between relative transition-colors h-[280px]">
                               <div className="absolute top-2 right-2 bg-slate-950/80 px-2 py-0.5 rounded text-[10px] text-slate-300 font-mono">Stock: {isTrackedInventory(item) ? getItemLocationQuantity(item, activeBranchId) : '∞'}</div>
                               <div>
-                                <img src={item.photoUrl} alt="" className="w-full h-45 object-cover rounded-md mb-1.5" />
+                                <img loading="lazy" src={item.photoUrl} alt="" className="w-full h-45 object-cover rounded-md mb-1.5" />
                                 <p className="font-bold text-xs text-white line-clamp-1">{item.name}</p>
                                 {(() => {
                                   const summary = getItemVarianceSummary(item);
@@ -7244,7 +7391,7 @@ export default function App() {
               </div>
               <div className="pt-3 border-t border-slate-700 mt-3">
                 {(isAdminUser || canCreate('pos')) ? (
-                  <button id="pos-complete-sale-btn" onClick={handleCheckout} disabled={posCheckoutBusy || sessionExpiredModalOpen || posCart.length === 0 || !posSelectedCustomer} className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 disabled:cursor-not-allowed text-slate-950 font-bold rounded-lg text-xs">{posCheckoutBusy ? 'Posting sale…' : 'Complete Sale'}</button>
+                  <button id="pos-complete-sale-btn" onClick={handleCheckout} disabled={posCheckoutBusy || posCart.length === 0 || !posSelectedCustomer} className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 disabled:cursor-not-allowed text-slate-950 font-bold rounded-lg text-xs">{posCheckoutBusy ? 'Posting sale…' : 'Complete Sale'}</button>
                 ) : (
                   <p className="text-[10px] text-center text-amber-400">No create privilege for POS.</p>
                 )}
@@ -7346,7 +7493,7 @@ export default function App() {
                   <div className="flex flex-wrap gap-2 items-center text-[10px]">
                     <span className="text-slate-400">Cash variance: <span className={`font-bold ${((parseFloat(cashUpForm.countedCash)||0) - cashAtHandAccount) === 0 ? 'text-emerald-400' : 'text-amber-400'}`}>{shopProfile.currency} {((parseFloat(cashUpForm.countedCash)||0) - cashAtHandAccount).toLocaleString()}</span></span>
                     <span className="text-slate-400">M-Pesa variance: <span className={`font-bold ${((parseFloat(cashUpForm.countedMpesa)||0) - mpesaAccountBalance) === 0 ? 'text-emerald-400' : 'text-amber-400'}`}>{shopProfile.currency} {((parseFloat(cashUpForm.countedMpesa)||0) - mpesaAccountBalance).toLocaleString()}</span></span>
-                    <button type="button" onClick={() => {
+                    <button type="button" disabled={isBusy('cashup_save')} onClick={() => runWithLock('cashup_save', async () => {
                       const entry = {
                         id: 'cashup-' + Date.now(),
                         at: new Date().toISOString(),
@@ -7364,7 +7511,7 @@ export default function App() {
                       if (typeof logAudit === 'function') logAudit('cashup', 'cash', entry.id);
                       alert('Cash-up saved.');
                       setCashUpForm({ countedCash: '', countedMpesa: '', notes: '' });
-                    }} className="ml-auto px-3 py-1.5 bg-emerald-500 text-slate-950 text-[10px] font-bold rounded">Save Cash-up</button>
+                    })} className="ml-auto px-3 py-1.5 bg-emerald-500 disabled:opacity-50 text-slate-950 text-[10px] font-bold rounded">{isBusy('cashup_save') ? 'Saving…' : 'Save Cash-up'}</button>
                   </div>
                   {cashUpHistory.length > 0 && (
                     <div className="overflow-x-auto max-h-28">
@@ -7407,8 +7554,8 @@ export default function App() {
                               </div>
                               {(isAdminUser || canUpdate('sales')) ? (
                                 <div className="flex gap-1.5">
-                                  <button type="button" onClick={() => handleApproveReturnRequest(req)} className="px-2.5 py-1 bg-emerald-500 text-slate-950 font-bold rounded text-[10px]">Approve & Process</button>
-                                  <button type="button" onClick={() => handleRejectReturnRequest(req)} className="px-2.5 py-1 bg-red-500/20 text-red-300 font-bold rounded text-[10px]">Reject</button>
+                                  <button type="button" disabled={isBusy(`ret_approve:${req.id}`) || isBusy(`ret_reject:${req.id}`)} onClick={() => handleApproveReturnRequest(req)} className="px-2.5 py-1 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded text-[10px]">{isBusy(`ret_approve:${req.id}`) ? 'Approving…' : 'Approve & Process'}</button>
+                                  <button type="button" disabled={isBusy(`ret_approve:${req.id}`) || isBusy(`ret_reject:${req.id}`)} onClick={() => handleRejectReturnRequest(req)} className="px-2.5 py-1 bg-red-500/20 disabled:opacity-50 text-red-300 font-bold rounded text-[10px]">{isBusy(`ret_reject:${req.id}`) ? 'Rejecting…' : 'Reject'}</button>
                                 </div>
                               ) : (
                                 <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-bold">Pending Manager</span>
@@ -7631,53 +7778,55 @@ export default function App() {
                   );
                 })}
               </div>
-              <button type="button" className="bg-sky-500 text-slate-950 font-bold rounded px-4 py-2 text-xs" onClick={async () => {
+              <button type="button" disabled={isBusy('stock_transfer')} className="bg-sky-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-slate-950 font-bold rounded px-4 py-2 text-xs" onClick={async () => {
                 const fromB = transferForm.fromBranchId || activeBranchId;
                 const toB = transferForm.toBranchId;
                 const lines = (transferForm.lines || []).filter(l => l.itemId && (parseInt(l.qty, 10) || 0) > 0);
                 if (!fromB || !toB) return alert('Select source and destination locations');
                 if (String(fromB) === String(toB)) return alert('Source and destination must differ');
                 if (!lines.length) return alert('Add at least one item with quantity');
-                let ok = 0;
-                const mvExtra = [];
-                for (const line of lines) {
-                  const qty = parseInt(line.qty, 10) || 0;
-                  const res = await apiFetch('/api/stock-transfer', { method: 'POST', body: JSON.stringify({ fromItemId: line.itemId, fromBranchId: fromB, toBranchId: toB, qty }) });
-                  const d = await res.json().catch(() => ({}));
-                  if (!res.ok) { alert(d.error || 'Transfer failed for an item'); continue; }
-                  ok++;
-                  const normalizeServerItem = (it) => {
-                    if (!it) return it;
-                    const lq = parseLocationQuantities(it);
-                    const ab = parseAllowedBranches(it);
-                    return { ...it, locationQuantities: lq, allowedBranches: ab, allLocations: !!(it.allLocations === true || it.allLocations === 1) };
-                  };
-                  if (d.from) setInventory(prev => prev.map(i => i.id === d.from.id ? { ...i, ...normalizeServerItem(d.from) } : i));
-                  if (d.to) {
-                    const normTo = normalizeServerItem(d.to);
-                    setInventory(prev => {
-                      const exists = prev.some(i => i.id === normTo.id);
-                      return exists ? prev.map(i => i.id === normTo.id ? { ...i, ...normTo } : i) : [normTo, ...prev];
-                    });
+                await runWithLock('stock_transfer', async () => {
+                  let ok = 0;
+                  const mvExtra = [];
+                  for (const line of lines) {
+                    const qty = parseInt(line.qty, 10) || 0;
+                    const res = await apiFetch('/api/stock-transfer', { method: 'POST', body: JSON.stringify({ fromItemId: line.itemId, fromBranchId: fromB, toBranchId: toB, qty }) });
+                    const d = await res.json().catch(() => ({}));
+                    if (!res.ok) { alert(d.error || 'Transfer failed for an item'); continue; }
+                    ok++;
+                    const normalizeServerItem = (it) => {
+                      if (!it) return it;
+                      const lq = parseLocationQuantities(it);
+                      const ab = parseAllowedBranches(it);
+                      return { ...it, locationQuantities: lq, allowedBranches: ab, allLocations: !!(it.allLocations === true || it.allLocations === 1) };
+                    };
+                    if (d.from) setInventory(prev => prev.map(i => i.id === d.from.id ? { ...i, ...normalizeServerItem(d.from) } : i));
+                    if (d.to) {
+                      const normTo = normalizeServerItem(d.to);
+                      setInventory(prev => {
+                        const exists = prev.some(i => i.id === normTo.id);
+                        return exists ? prev.map(i => i.id === normTo.id ? { ...i, ...normTo } : i) : [normTo, ...prev];
+                      });
+                    }
+                    const src = (inventory || []).find(i => i.id === line.itemId);
+                    const destName = (branches || []).find(b => b.id === toB)?.name || toB;
+                    const srcLabel = src ? formatItemDisplayName(src) : (d.from?.name || 'Transferred Item');
+                    const destLabel = d.to ? formatItemDisplayName(d.to) : srcLabel;
+                    mvExtra.push(
+                      { id: 'mv-' + Date.now() + '-' + ok, at: new Date().toISOString(), itemName: srcLabel, qtyChange: -qty, reason: 'Transfer out', ref: destName, user: currentUser?.name || '' },
+                      { id: 'mv-' + Date.now() + '-in-' + ok, at: new Date().toISOString(), itemName: destLabel, qtyChange: qty, reason: 'Transfer in', ref: destName, user: currentUser?.name || '' }
+                    );
                   }
-                  const src = (inventory || []).find(i => i.id === line.itemId);
-                  const destName = (branches || []).find(b => b.id === toB)?.name || toB;
-                  const srcLabel = src ? formatItemDisplayName(src) : (d.from?.name || 'Transferred Item');
-                  const destLabel = d.to ? formatItemDisplayName(d.to) : srcLabel;
-                  mvExtra.push(
-                    { id: 'mv-' + Date.now() + '-' + ok, at: new Date().toISOString(), itemName: srcLabel, qtyChange: -qty, reason: 'Transfer out', ref: destName, user: currentUser?.name || '' },
-                    { id: 'mv-' + Date.now() + '-in-' + ok, at: new Date().toISOString(), itemName: destLabel, qtyChange: qty, reason: 'Transfer in', ref: destName, user: currentUser?.name || '' }
-                  );
-                }
-                if (mvExtra.length && typeof saveStockMovements === 'function') {
-                  saveStockMovements([...mvExtra, ...(stockMovements || [])]);
-                } else if (mvExtra.length) {
-                  const nextMv = [...mvExtra, ...(stockMovements || [])];
-                  setStockMovements(nextMv);
-                }
-                setTransferForm({ fromBranchId: fromB, toBranchId: '', lines: [{ itemId: '', qty: '' }] });
-                if (ok) alert('Stock transferred (' + ok + ' line(s)).');
-              }}>Transfer all lines</button>
+                  if (mvExtra.length && typeof saveStockMovements === 'function') {
+                    saveStockMovements([...mvExtra, ...(stockMovements || [])]);
+                  } else if (mvExtra.length) {
+                    const nextMv = [...mvExtra, ...(stockMovements || [])];
+                    setStockMovements(nextMv);
+                  }
+                  setTransferForm({ fromBranchId: fromB, toBranchId: '', lines: [{ itemId: '', qty: '' }] });
+                  if (ok) alert('Stock transferred (' + ok + ' line(s)).');
+                });
+              }}>{isBusy('stock_transfer') ? 'Transferring…' : 'Transfer all lines'}</button>
             </div>
             )}
 
@@ -7975,7 +8124,8 @@ export default function App() {
                     />
                     <button
                       type="button"
-                      onClick={async () => {
+                      disabled={isBusy('po_limit')}
+                      onClick={() => runWithLock('po_limit', async () => {
                         const lim = Math.max(0, parseFloat(poApprovalLimitDraft) || 0);
                         const res = await apiFetch('/api/tenant-settings', {
                           method: 'PUT',
@@ -7991,10 +8141,10 @@ export default function App() {
                         setPoApprovalLimitDraft(String(lim));
                         logAudit('update', 'po_approval_limit', `Set Purchase Order Admin approval limit to ${shopProfile.currency} ${lim.toLocaleString()}`);
                         alert(lim > 0 ? `Purchase approval limit saved: POs above ${shopProfile.currency} ${lim.toLocaleString()} now require Admin approval.` : 'Purchase approval limit cleared (no threshold).');
-                      }}
-                      className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg"
+                      })}
+                      className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold rounded-lg"
                     >
-                      Save Limit
+                      {isBusy('po_limit') ? 'Saving…' : 'Save Limit'}
                     </button>
                   </div>
                 </div>
@@ -8021,8 +8171,8 @@ export default function App() {
                           </div>
                           {(isAdminUser || canUpdate('purchase')) ? (
                             <div className="flex gap-1.5">
-                              <button type="button" onClick={() => handleApproveReturnRequest(req)} className="px-2.5 py-1 bg-emerald-500 text-slate-950 font-bold rounded text-[10px]">Approve & Process</button>
-                              <button type="button" onClick={() => handleRejectReturnRequest(req)} className="px-2.5 py-1 bg-red-500/20 text-red-300 font-bold rounded text-[10px]">Reject</button>
+                              <button type="button" disabled={isBusy(`ret_approve:${req.id}`) || isBusy(`ret_reject:${req.id}`)} onClick={() => handleApproveReturnRequest(req)} className="px-2.5 py-1 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded text-[10px]">{isBusy(`ret_approve:${req.id}`) ? 'Processing…' : 'Approve & Process'}</button>
+                              <button type="button" disabled={isBusy(`ret_approve:${req.id}`) || isBusy(`ret_reject:${req.id}`)} onClick={() => handleRejectReturnRequest(req)} className="px-2.5 py-1 bg-red-500/20 disabled:opacity-50 text-red-300 font-bold rounded text-[10px]">{isBusy(`ret_reject:${req.id}`) ? 'Rejecting…' : 'Reject'}</button>
                             </div>
                           ) : (
                             <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-bold">Pending Manager</span>
@@ -8110,7 +8260,7 @@ export default function App() {
                             <td className="py-3 px-3 text-sky-400 font-semibold">{po.createdBy || '—'}</td>
                             <td className="py-3 px-3 space-x-1" onClick={e => e.stopPropagation()}>
                               {po.workflowStatus === 'Draft' && canApproveThisPO && (
-                                <button onClick={async () => {
+                                <button disabled={isBusy(`po_approve:${po.id}`)} onClick={() => runWithLock(`po_approve:${po.id}`, async () => {
                                     const amt = parseFloat(po.amount) || 0;
                                     const paid = parseFloat(po.paidAmount) || 0;
                                     const updated = {
@@ -8124,7 +8274,7 @@ export default function App() {
                                     };
                                     const ok = await upsertPO(updated);
                                     if (ok) logAudit('approve', 'purchase_orders', `Approved ${po.id} (${shopProfile.currency} ${amt.toLocaleString()})`);
-                                  }} className="px-2 py-1 bg-blue-500/20 text-blue-400 font-bold rounded text-[10px]">Approve</button>
+                                  })} className="px-2 py-1 bg-blue-500/20 disabled:opacity-50 text-blue-400 font-bold rounded text-[10px]">{isBusy(`po_approve:${po.id}`) ? 'Approving…' : 'Approve'}</button>
                               )}
                               {po.workflowStatus === 'Draft' && !canApproveThisPO && exceedsAdminLimit && (
                                 <button type="button" onClick={() => {
@@ -8135,7 +8285,7 @@ export default function App() {
                                 </button>
                               )}
                               {po.workflowStatus === 'Draft' && (isAdminUser || canDelete('purchase')) && (
-                                  <button onClick={async () => {
+                                  <button disabled={isBusy(`po_del:${po.id}`)} onClick={() => runWithLock(`po_del:${po.id}`, async () => {
                                     if (!window.confirm('Are you sure you want to delete this draft purchase order?')) return;
                                     const res = await apiFetch(`/api/purchase_orders/${po.id}`, { method: 'DELETE' });
                                     if (res.ok) {
@@ -8153,7 +8303,7 @@ export default function App() {
                                     } else {
                                       alert('Failed to delete purchase order.');
                                     }
-                                  }} className="px-2 py-1 bg-red-500/20 text-red-400 font-bold rounded text-[10px]">Delete</button>
+                                  })} className="px-2 py-1 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded text-[10px]">{isBusy(`po_del:${po.id}`) ? 'Deleting…' : 'Delete'}</button>
                               )}
                               {(po.workflowStatus === 'Approved' || po.workflowStatus === 'Partially Received' || (po.workflowStatus === 'Payment' && !po.received)) && !po.received && (isAdminUser || canUpdate('purchase')) && (
                                 <button onClick={() => openPOReceiveModal(po)} className="px-2 py-1 bg-emerald-500/20 text-emerald-400 font-bold rounded text-[10px]">
@@ -8319,7 +8469,7 @@ export default function App() {
                         </div>
                       )}
                     </div>
-                    <button type="submit" className="w-full py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Save Supplier</button>
+                    <button type="submit" disabled={isBusy('sup_create')} className="w-full py-2.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('sup_create') ? 'Saving…' : 'Save Supplier'}</button>
                   </form>
                 </div>
               </div>
@@ -8333,12 +8483,14 @@ export default function App() {
                     <h4 className="font-bold text-white text-sm">Edit Supplier: {selectedSupplier.name}</h4>
                     <button onClick={() => setSelectedSupplier(null)} className="text-slate-400">✕</button>
                   </div>
-                  <form onSubmit={async e => {
+                  <form onSubmit={e => {
                     e.preventDefault();
-                    if (!(isAdminUser || canUpdate('suppliers'))) return;
-                    await apiFetch(`/api/suppliers/${selectedSupplier.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(selectedSupplier) });
-                    setSuppliers(suppliers.map(s => s.id === selectedSupplier.id ? selectedSupplier : s));
-                    setSelectedSupplier(null);
+                    runWithLock('sup_save', async () => {
+                      if (!(isAdminUser || canUpdate('suppliers'))) return;
+                      await apiFetch(`/api/suppliers/${selectedSupplier.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(selectedSupplier) });
+                      setSuppliers(suppliers.map(s => s.id === selectedSupplier.id ? selectedSupplier : s));
+                      setSelectedSupplier(null);
+                    });
                   }} className="space-y-3 text-xs">
                     <div><label className="text-slate-400 block mb-1">Supplier Name</label><input type="text" value={selectedSupplier.name} onChange={e => setSelectedSupplier({...selectedSupplier, name: e.target.value})} required className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /></div>
                     <div><label className="text-slate-400 block mb-1">Phone No.</label><input type="text" value={selectedSupplier.phone || ''} onChange={e => setSelectedSupplier({...selectedSupplier, phone: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /></div>
@@ -8371,16 +8523,16 @@ export default function App() {
                     </div>
                     <div className="flex gap-2 pt-2">
                       {(isAdminUser || canUpdate('suppliers')) && (
-                        <button type="submit" className="flex-1 py-2 bg-emerald-500 text-slate-950 font-bold rounded">Save Changes</button>
+                        <button type="submit" disabled={isBusy('sup_save')} className="flex-1 py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('sup_save') ? 'Saving…' : 'Save Changes'}</button>
                       )}
                       {(isAdminUser || canDelete('suppliers')) && (
-                        <button type="button" onClick={async () => {
+                        <button type="button" disabled={isBusy('sup_del')} onClick={() => runWithLock('sup_del', async () => {
                           if (!window.confirm('Delete supplier?')) return;
                           await apiFetch(`/api/suppliers/${selectedSupplier.id}`, { method: 'DELETE' });
                           logAudit('delete', 'suppliers', `${selectedSupplier.id} (${selectedSupplier.name || ''})`);
                           setSuppliers(suppliers.filter(s => s.id !== selectedSupplier.id));
                           setSelectedSupplier(null);
-                        }} className="py-2 px-4 bg-red-500/20 text-red-400 font-bold rounded">Delete</button>
+                        })} className="py-2 px-4 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('sup_del') ? 'Deleting…' : 'Delete'}</button>
                       )}
                       {(!isAdminUser && !canUpdate('suppliers') && !canDelete('suppliers')) && (
                         <button type="button" onClick={() => setSelectedSupplier(null)} className="flex-1 py-2 bg-slate-800 text-white font-bold rounded">Close</button>
@@ -8402,74 +8554,75 @@ export default function App() {
                     </div>
                     <button onClick={() => setNewPOModalOpen(false)} className="text-slate-400 hover:text-white transition-colors">✕</button>
                   </div>
-                  <form onSubmit={async e => {
+                  <form onSubmit={e => {
                     e.preventDefault();
-                    if (!newPOForm.supplierId) return alert('Select a supplier');
-                    const lines = (poLines || []).filter(l => l.itemId && l.itemName && (parseInt(l.quantity) || 0) > 0);
-                    if (!lines.length) return alert('Add at least one item');
-                    // Single PO for multi-item: one workflow record, items stored as array with variance details
-                    const linePayloads = lines.map(line => {
-                      const baseAmount = parseFloat(line.amount) || ((parseFloat(line.cost) || 0) * (parseInt(line.quantity) || 1));
-                      let lineTax = 0;
-                      let lineFinal = baseAmount;
-                      if (poApplyTax && taxSettings.purchaseTaxRate > 0) {
-                        if (poTaxInclusive) {
-                          lineTax = baseAmount - (baseAmount / (1 + taxSettings.purchaseTaxRate / 100));
-                          lineFinal = baseAmount;
-                        } else {
-                          lineTax = baseAmount * (taxSettings.purchaseTaxRate / 100);
-                          lineFinal = baseAmount + lineTax;
+                    runWithLock('po_create', async () => {
+                      if (!newPOForm.supplierId) return alert('Select a supplier');
+                      const lines = (poLines || []).filter(l => l.itemId && l.itemName && (parseInt(l.quantity) || 0) > 0);
+                      if (!lines.length) return alert('Add at least one item');
+                      const linePayloads = lines.map(line => {
+                        const baseAmount = parseFloat(line.amount) || ((parseFloat(line.cost) || 0) * (parseInt(line.quantity) || 1));
+                        let lineTax = 0;
+                        let lineFinal = baseAmount;
+                        if (poApplyTax && taxSettings.purchaseTaxRate > 0) {
+                          if (poTaxInclusive) {
+                            lineTax = baseAmount - (baseAmount / (1 + taxSettings.purchaseTaxRate / 100));
+                            lineFinal = baseAmount;
+                          } else {
+                            lineTax = baseAmount * (taxSettings.purchaseTaxRate / 100);
+                            lineFinal = baseAmount + lineTax;
+                          }
                         }
-                      }
-                      const invItem = (branchInventory || []).find(i => i.id === line.itemId);
-                      const varianceSummary = invItem ? getItemVarianceSummary(invItem) : (line.varianceSummary || '');
-                      const varianceValues = invItem ? parseItemVarianceValues(invItem) : (line.varianceValues || {});
-                      return {
-                        itemId: line.itemId,
-                        itemName: line.itemName,
-                        varianceSummary,
-                        varianceValues,
-                        quantity: parseInt(line.quantity) || 1,
-                        cost: parseFloat(line.cost) || 0,
-                        amount: lineFinal,
-                        taxAmount: Math.round(lineTax * 100) / 100,
-                        returnedQty: 0
+                        const invItem = (branchInventory || []).find(i => i.id === line.itemId);
+                        const varianceSummary = invItem ? getItemVarianceSummary(invItem) : (line.varianceSummary || '');
+                        const varianceValues = invItem ? parseItemVarianceValues(invItem) : (line.varianceValues || {});
+                        return {
+                          itemId: line.itemId,
+                          itemName: line.itemName,
+                          varianceSummary,
+                          varianceValues,
+                          quantity: parseInt(line.quantity) || 1,
+                          cost: parseFloat(line.cost) || 0,
+                          amount: lineFinal,
+                          taxAmount: Math.round(lineTax * 100) / 100,
+                          returnedQty: 0
+                        };
+                      });
+                      const totalAmount = linePayloads.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
+                      const totalTax = linePayloads.reduce((s, l) => s + (parseFloat(l.taxAmount) || 0), 0);
+                      const totalQty = linePayloads.reduce((s, l) => s + (parseInt(l.quantity) || 0), 0);
+                      const first = linePayloads[0];
+                      const po = {
+                        id: `PO-${Math.floor(Math.random() * 8999 + 1000)}`,
+                        groupId: 'POG-' + Date.now(),
+                        createdBy: currentUser?.name || currentUser?.id || '',
+                        date: new Date().toISOString().split('T')[0],
+                        supplierId: newPOForm.supplierId,
+                        supplierName: newPOForm.supplierName,
+                        itemId: first.itemId,
+                        itemName: linePayloads.length > 1 ? `${linePayloads.length} items` : first.itemName,
+                        varianceSummary: first.varianceSummary || '',
+                        varianceValues: first.varianceValues || {},
+                        quantity: totalQty,
+                        cost: first.cost,
+                        amount: totalAmount,
+                        taxAmount: Math.round(totalTax * 100) / 100,
+                        taxRate: poApplyTax ? taxSettings.purchaseTaxRate : 0,
+                        taxInclusive: !!poTaxInclusive,
+                        paidAmount: 0,
+                        balanceDue: totalAmount,
+                        paymentStatus: 'Unpaid',
+                        workflowStatus: 'Draft',
+                        paymentMethod: newPOForm.paymentMethod || 'Cash',
+                        branchId: activeBranchId || undefined,
+                        items: JSON.stringify(linePayloads)
                       };
+                      try { await apiFetch('/api/purchase_orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(po) }); } catch (err) { console.warn(err); }
+                      const nextPOs = [po, ...purchaseOrders];
+                      setPurchaseOrders(nextPOs);
+                      setPoLines([{ itemId: '', itemName: '', quantity: 1, cost: 0, amount: 0, varianceSummary: '', varianceValues: {} }]);
+                      setNewPOModalOpen(false);
                     });
-                    const totalAmount = linePayloads.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
-                    const totalTax = linePayloads.reduce((s, l) => s + (parseFloat(l.taxAmount) || 0), 0);
-                    const totalQty = linePayloads.reduce((s, l) => s + (parseInt(l.quantity) || 0), 0);
-                    const first = linePayloads[0];
-                    const po = {
-                      id: `PO-${Math.floor(Math.random() * 8999 + 1000)}`,
-                      groupId: 'POG-' + Date.now(),
-                      createdBy: currentUser?.name || currentUser?.id || '',
-                      date: new Date().toISOString().split('T')[0],
-                      supplierId: newPOForm.supplierId,
-                      supplierName: newPOForm.supplierName,
-                      itemId: first.itemId,
-                      itemName: linePayloads.length > 1 ? `${linePayloads.length} items` : first.itemName,
-                      varianceSummary: first.varianceSummary || '',
-                      varianceValues: first.varianceValues || {},
-                      quantity: totalQty,
-                      cost: first.cost,
-                      amount: totalAmount,
-                      taxAmount: Math.round(totalTax * 100) / 100,
-                      taxRate: poApplyTax ? taxSettings.purchaseTaxRate : 0,
-                      taxInclusive: !!poTaxInclusive,
-                      paidAmount: 0,
-                      balanceDue: totalAmount,
-                      paymentStatus: 'Unpaid',
-                      workflowStatus: 'Draft',
-                      paymentMethod: newPOForm.paymentMethod || 'Cash',
-                      branchId: activeBranchId || undefined,
-                      items: JSON.stringify(linePayloads)
-                    };
-                    try { await apiFetch('/api/purchase_orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(po) }); } catch (e) { console.warn(e); }
-                    const nextPOs = [po, ...purchaseOrders];
-                    setPurchaseOrders(nextPOs);
-                    setPoLines([{ itemId: '', itemName: '', quantity: 1, cost: 0, amount: 0, varianceSummary: '', varianceValues: {} }]);
-                    setNewPOModalOpen(false);
                   }} className="space-y-3 text-xs">
                     <div>
                       <label className="text-slate-400 block mb-1">Select Supplier *</label>
@@ -8632,7 +8785,7 @@ export default function App() {
                         <div className="flex justify-between"><span className="text-slate-400">Grand total</span><span className="text-emerald-400 font-bold">{shopProfile.currency} {(poTaxInclusive ? (parseFloat(newPOForm.amount)||0) : ((parseFloat(newPOForm.amount)||0) * (1 + taxSettings.purchaseTaxRate/100))).toLocaleString(undefined,{maximumFractionDigits:2})}</span></div>
                       </div>
                     )}
-                    <button type="submit" className="w-full py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Create Purchase Order</button>
+                    <button type="submit" disabled={isBusy('po_create')} className="w-full py-2.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('po_create') ? 'Creating…' : 'Create Purchase Order'}</button>
                   </form>
                 </div>
               </div>
@@ -8773,27 +8926,21 @@ export default function App() {
                     </div>
                     <div className="flex gap-2 pt-2">
                       {(isAdminUser || canUpdate('purchase')) && (
-                        <button type="button" onClick={async () => {
+                        <button type="button" disabled={isBusy('po_save')} onClick={() => runWithLock('po_save', async () => {
                           const updated = { ...selectedPO };
-                          setPurchaseOrders(prev => {
-                            const next = prev.map(p => p.id === updated.id ? updated : p);
-                            return next;
-                          });
+                          setPurchaseOrders(prev => prev.map(p => p.id === updated.id ? updated : p));
                           try { await apiFetch(`/api/purchase_orders/${updated.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) }); } catch (e) {}
                           setSelectedPO(null);
-                        }} className="flex-1 py-2 bg-emerald-500 text-slate-950 font-bold rounded">Save Changes</button>
+                        })} className="flex-1 py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('po_save') ? 'Saving…' : 'Save Changes'}</button>
                       )}
                       {(isAdminUser || canDelete('purchase')) && (
-                        <button type="button" onClick={async () => {
+                        <button type="button" disabled={isBusy('po_del')} onClick={() => runWithLock('po_del', async () => {
                           if (!window.confirm(`Delete purchase order ${selectedPO.id}? This cannot be undone.`)) return;
                           try { await apiFetch(`/api/purchase_orders/${selectedPO.id}`, { method: 'DELETE' }); } catch (e) {}
                           logAudit('delete', 'purchase_orders', `${selectedPO.id} (${selectedPO.supplierName || ''})`);
-                          setPurchaseOrders(prev => {
-                            const next = prev.filter(p => p.id !== selectedPO.id);
-                            return next;
-                          });
+                          setPurchaseOrders(prev => prev.filter(p => p.id !== selectedPO.id));
                           setSelectedPO(null);
-                        }} className="py-2 px-4 bg-red-500/20 text-red-400 font-bold rounded">Delete</button>
+                        })} className="py-2 px-4 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('po_del') ? 'Deleting…' : 'Delete'}</button>
                       )}
                       <button type="button" onClick={() => setSelectedPO(null)} className="py-2 px-4 bg-slate-800 text-white font-bold rounded">Close</button>
                     </div>
@@ -8809,50 +8956,49 @@ export default function App() {
                     <h4 className="font-bold text-white text-sm">Make Payment for PO: {selectedPO.id}</h4>
                     <button onClick={() => setPoPaymentModalOpen(false)} className="text-slate-400">✕</button>
                   </div>
-                  <form onSubmit={async e => {
+                  <form onSubmit={e => {
                     e.preventDefault();
-                    const payAmt = Math.round((parseFloat(poPaymentForm.payAmount) || 0) * 100) / 100;
-                    const outstanding = Math.max(0, Number(selectedPO.balanceDue) || 0);
-                    if (payAmt <= 0) { alert('Enter a payment amount greater than zero.'); return; }
-                    if (payAmt > outstanding) { alert(`Payment cannot exceed the outstanding balance of ${shopProfile.currency} ${outstanding.toLocaleString()}.`); return; }
-                    const prevPaid = Number(selectedPO.paidAmount) || 0;
-                    const newPaid = prevPaid + payAmt;
-                    const newBalance = Math.max(0, outstanding - payAmt);
-                    const newStatus = newBalance === 0 ? 'Paid' : 'Partial';
-                    let existingHist = selectedPO.paymentHistory;
-                    try { if (typeof existingHist === 'string') existingHist = JSON.parse(existingHist || '[]'); } catch (_) { existingHist = []; }
-                    if (!Array.isArray(existingHist)) existingHist = [];
-                    if (existingHist.length === 0 && prevPaid > 0) {
-                      existingHist = [{
-                        id: `popay-init-${selectedPO.id}`,
-                        date: selectedPO.date,
-                        amount: prevPaid,
-                        paymentMethod: selectedPO.paymentMethod || 'Cash',
-                        mpesaCode: selectedPO.mpesaCode || ''
-                      }];
-                    }
-                    const paymentRecord = { id: `popay-${Date.now()}`, date: new Date().toISOString(), amount: payAmt, paymentMethod: poPaymentForm.paymentMethod, mpesaCode: String(poPaymentForm.paymentMethod||'').toLowerCase().includes('m-pesa') ? (poPaymentForm.mpesaCode || '') : '', recordedBy: currentUser?.name || 'Staff' };
-                    const updated = {
-                      ...selectedPO,
-                      paidAmount: newPaid,
-                      balanceDue: newBalance,
-                      paymentMethod: selectedPO.paymentMethod && selectedPO.paymentMethod !== poPaymentForm.paymentMethod ? `${selectedPO.paymentMethod} + ${poPaymentForm.paymentMethod}` : poPaymentForm.paymentMethod,
-                      lastPaymentMethod: poPaymentForm.paymentMethod,
-                      paymentStatus: newStatus,
-                      paymentHistory: [...existingHist, paymentRecord],
-                      mpesaCode: String(poPaymentForm.paymentMethod||'').toLowerCase().includes('m-pesa') ? (poPaymentForm.mpesaCode || selectedPO.mpesaCode || '') : (selectedPO.mpesaCode || ''),
-                      workflowStatus: selectedPO.workflowStatus === 'Draft' ? selectedPO.workflowStatus : (selectedPO.workflowStatus === 'Partially Received' ? 'Partially Received' : 'Payment')
-                    };
-                    const ok = await upsertPO(updated);
-                    if (ok) {
-                      logAudit('payment', 'purchase_orders', `${selectedPO.id} · ${shopProfile.currency} ${payAmt} via ${poPaymentForm.paymentMethod}`);
-                      setPaymentMethods(prev => {
-                        const next = prev.map(pm => (pm.name || '').toLowerCase() === poPaymentForm.paymentMethod.toLowerCase() ? { ...pm, startingBalance: Math.max(0, (Number(pm.startingBalance) || 0) - payAmt) } : pm);
-                        return next;
-                      });
-                    }
-                    setPoPaymentModalOpen(false);
-                    setSelectedPO(null);
+                    runWithLock('po_pay', async () => {
+                      const payAmt = Math.round((parseFloat(poPaymentForm.payAmount) || 0) * 100) / 100;
+                      const outstanding = Math.max(0, Number(selectedPO.balanceDue) || 0);
+                      if (payAmt <= 0) { alert('Enter a payment amount greater than zero.'); return; }
+                      if (payAmt > outstanding) { alert(`Payment cannot exceed the outstanding balance of ${shopProfile.currency} ${outstanding.toLocaleString()}.`); return; }
+                      const prevPaid = Number(selectedPO.paidAmount) || 0;
+                      const newPaid = prevPaid + payAmt;
+                      const newBalance = Math.max(0, outstanding - payAmt);
+                      const newStatus = newBalance === 0 ? 'Paid' : 'Partial';
+                      let existingHist = selectedPO.paymentHistory;
+                      try { if (typeof existingHist === 'string') existingHist = JSON.parse(existingHist || '[]'); } catch (_) { existingHist = []; }
+                      if (!Array.isArray(existingHist)) existingHist = [];
+                      if (existingHist.length === 0 && prevPaid > 0) {
+                        existingHist = [{
+                          id: `popay-init-${selectedPO.id}`,
+                          date: selectedPO.date,
+                          amount: prevPaid,
+                          paymentMethod: selectedPO.paymentMethod || 'Cash',
+                          mpesaCode: selectedPO.mpesaCode || ''
+                        }];
+                      }
+                      const paymentRecord = { id: `popay-${Date.now()}`, date: new Date().toISOString(), amount: payAmt, paymentMethod: poPaymentForm.paymentMethod, mpesaCode: String(poPaymentForm.paymentMethod||'').toLowerCase().includes('m-pesa') ? (poPaymentForm.mpesaCode || '') : '', recordedBy: currentUser?.name || 'Staff' };
+                      const updated = {
+                        ...selectedPO,
+                        paidAmount: newPaid,
+                        balanceDue: newBalance,
+                        paymentMethod: selectedPO.paymentMethod && selectedPO.paymentMethod !== poPaymentForm.paymentMethod ? `${selectedPO.paymentMethod} + ${poPaymentForm.paymentMethod}` : poPaymentForm.paymentMethod,
+                        lastPaymentMethod: poPaymentForm.paymentMethod,
+                        paymentStatus: newStatus,
+                        paymentHistory: [...existingHist, paymentRecord],
+                        mpesaCode: String(poPaymentForm.paymentMethod||'').toLowerCase().includes('m-pesa') ? (poPaymentForm.mpesaCode || selectedPO.mpesaCode || '') : (selectedPO.mpesaCode || ''),
+                        workflowStatus: selectedPO.workflowStatus === 'Draft' ? selectedPO.workflowStatus : (selectedPO.workflowStatus === 'Partially Received' ? 'Partially Received' : 'Payment')
+                      };
+                      const ok = await upsertPO(updated);
+                      if (ok) {
+                        logAudit('payment', 'purchase_orders', `${selectedPO.id} · ${shopProfile.currency} ${payAmt} via ${poPaymentForm.paymentMethod}`);
+                        setPaymentMethods(prev => prev.map(pm => (pm.name || '').toLowerCase() === poPaymentForm.paymentMethod.toLowerCase() ? { ...pm, startingBalance: Math.max(0, (Number(pm.startingBalance) || 0) - payAmt) } : pm));
+                      }
+                      setPoPaymentModalOpen(false);
+                      setSelectedPO(null);
+                    });
                   }} className="space-y-3 text-xs">
                     <div>
                       <label className="text-slate-400 block mb-1">Payment Method</label>
@@ -8872,7 +9018,7 @@ export default function App() {
                       <label className="text-slate-400 block mb-1">Payment Amount ({shopProfile.currency})</label>
                       <input type="number" value={poPaymentForm.payAmount} onChange={e => setPoPaymentForm({...poPaymentForm, payAmount: e.target.value})} required className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" />
                     </div>
-                    <button type="submit" className="w-full py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Submit Payment</button>
+                    <button type="submit" disabled={isBusy('po_pay')} className="w-full py-2.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('po_pay') ? 'Submitting…' : 'Submit Payment'}</button>
                   </form>
                 </div>
               </div>
@@ -8886,81 +9032,79 @@ export default function App() {
             {(isAdminUser || canCreate('expenses')) && (
               <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 min-h-[480px]">
                 <h3 className="text-sm font-bold text-white mb-4">Record Operating Expense</h3>
-                <form onSubmit={async e => {
+                <form onSubmit={e => {
                   e.preventDefault();
-                  if (sessionExpiredModalOpen) {
-                    alert('Session expired — please sign in again before saving expenses.');
-                    return;
-                  }
-                  if (!newExpense.amount || !newExpense.description) return;
-                  const baseAmt = parseFloat(newExpense.amount) || 0;
-                  let taxAmt = 0;
-                  let finalAmt = baseAmt;
-                  if (expenseApplyTax && (taxSettings.expenseTaxRate ?? taxSettings.purchaseTaxRate) > 0) {
-                    const _expRate = taxSettings.expenseTaxRate ?? taxSettings.purchaseTaxRate;
-                    if (expenseTaxInclusive) {
-                      taxAmt = baseAmt - (baseAmt / (1 + _expRate / 100));
-                      finalAmt = baseAmt;
-                    } else {
-                      taxAmt = baseAmt * (_expRate / 100);
-                      finalAmt = baseAmt + taxAmt;
+                  runWithLock('exp_create', async () => {
+                    if (!newExpense.amount || !newExpense.description) return;
+                    const baseAmt = parseFloat(newExpense.amount) || 0;
+                    let taxAmt = 0;
+                    let finalAmt = baseAmt;
+                    if (expenseApplyTax && (taxSettings.expenseTaxRate ?? taxSettings.purchaseTaxRate) > 0) {
+                      const _expRate = taxSettings.expenseTaxRate ?? taxSettings.purchaseTaxRate;
+                      if (expenseTaxInclusive) {
+                        taxAmt = baseAmt - (baseAmt / (1 + _expRate / 100));
+                        finalAmt = baseAmt;
+                      } else {
+                        taxAmt = baseAmt * (_expRate / 100);
+                        finalAmt = baseAmt + taxAmt;
+                      }
                     }
-                  }
-                  const paidAmt = parseFloat(newExpense.paidAmount);
-                  const paidFinal = isNaN(paidAmt) ? finalAmt : Math.min(Math.max(0, paidAmt), finalAmt);
-                  const balDue = Math.max(0, finalAmt - paidFinal);
-                  const payStatus = balDue <= 0 ? 'Paid' : (paidFinal > 0 ? 'Partially Paid' : 'Unpaid');
-                  const exp = {
-                    id: `exp-${Date.now()}`,
-                    createdBy: currentUser?.name || currentUser?.id || '',
-                    branchId: activeBranchId || undefined,
-                    ...newExpense,
-                    amount: finalAmt,
-                    paidAmount: paidFinal,
-                    balanceDue: balDue,
-                    paymentStatus: payStatus,
-                    paymentHistory: paidFinal > 0 ? [{
-                      id: `exppay-${Date.now()}`,
-                      date: new Date().toISOString(),
-                      amount: paidFinal,
-                      paymentMethod: newExpense.paymentMethod || 'Cash',
-                      mpesaCode: String(newExpense.paymentMethod || '').toLowerCase().includes('m-pesa') ? (newExpense.mpesaCode || '') : ''
-                    }] : [],
-                    subtotal: baseAmt,
-                    taxAmount: Math.round(taxAmt * 100) / 100,
-                    taxRate: expenseApplyTax ? (taxSettings.expenseTaxRate ?? taxSettings.purchaseTaxRate) : 0,
-                    taxName: expenseApplyTax ? (taxSettings.expenseTaxName || 'Expense VAT') : (taxSettings.purchaseTaxName || 'VAT')
-                  };
-                  try {
-                    const res = await apiFetch('/api/expenses', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify(exp)
-                    });
-                    if (res.status === 401) {
-                      return;
-                    }
-                    if (!res.ok) {
-                      const errData = await res.json().catch(() => ({}));
-                      if (res.status >= 400 && res.status < 500) {
-                        alert(errData.error || 'Could not save expense.');
+                    const paidAmt = parseFloat(newExpense.paidAmount);
+                    const paidFinal = isNaN(paidAmt) ? finalAmt : Math.min(Math.max(0, paidAmt), finalAmt);
+                    const balDue = Math.max(0, finalAmt - paidFinal);
+                    const payStatus = balDue <= 0 ? 'Paid' : (paidFinal > 0 ? 'Partially Paid' : 'Unpaid');
+                    const exp = {
+                      id: `exp-${Date.now()}`,
+                      createdBy: currentUser?.name || currentUser?.id || '',
+                      branchId: activeBranchId || undefined,
+                      ...newExpense,
+                      amount: finalAmt,
+                      paidAmount: paidFinal,
+                      balanceDue: balDue,
+                      paymentStatus: payStatus,
+                      paymentHistory: paidFinal > 0 ? [{
+                        id: `exppay-${Date.now()}`,
+                        date: new Date().toISOString(),
+                        amount: paidFinal,
+                        paymentMethod: newExpense.paymentMethod || 'Cash',
+                        mpesaCode: String(newExpense.paymentMethod || '').toLowerCase().includes('m-pesa') ? (newExpense.mpesaCode || '') : ''
+                      }] : [],
+                      subtotal: baseAmt,
+                      taxAmount: Math.round(taxAmt * 100) / 100,
+                      taxRate: expenseApplyTax ? (taxSettings.expenseTaxRate ?? taxSettings.purchaseTaxRate) : 0,
+                      taxName: expenseApplyTax ? (taxSettings.expenseTaxName || 'Expense VAT') : (taxSettings.purchaseTaxName || 'VAT')
+                    };
+                    try {
+                      const res = await apiFetch('/api/expenses', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(exp)
+                      });
+                      if (res.status === 401) {
                         return;
                       }
-                      throw new Error(errData.error || `HTTP ${res.status}`);
+                      if (!res.ok) {
+                        const errData = await res.json().catch(() => ({}));
+                        if (res.status >= 400 && res.status < 500) {
+                          alert(errData.error || 'Could not save expense.');
+                          return;
+                        }
+                        throw new Error(errData.error || `HTTP ${res.status}`);
+                      }
+                      persistExpenses([exp, ...expenses]);
+                      if (paidFinal > 0) {
+                        logAudit('payment', 'expense', `${exp.id} · ${shopProfile.currency} ${paidFinal} via ${newExpense.paymentMethod || 'Cash'} (${newExpense.description || ''})`);
+                      }
+                      setNewExpense({ date: new Date().toISOString().split('T')[0], category: expenseCategories[0]?.name || 'Store Rent', description: '', amount: '', paidAmount: '', paymentMethod: 'Cash', mpesaCode: '', payer: '', paidTo: '' });
+                    } catch (err) {
+                      persistExpenses([exp, ...expenses]);
+                      if (paidFinal > 0) {
+                        logAudit('payment', 'expense', `${exp.id} · ${shopProfile.currency} ${paidFinal} via ${newExpense.paymentMethod || 'Cash'} (${newExpense.description || ''})`);
+                      }
+                      saveOfflineQueue([...(offlineQueue || []), { id: `oq-exp-${Date.now()}`, type: 'expense', payload: exp, at: new Date().toISOString(), status: 'pending', lastError: (err && err.message) || 'Offline / queued for sync' }]);
+                      setNewExpense({ date: new Date().toISOString().split('T')[0], category: expenseCategories[0]?.name || 'Store Rent', description: '', amount: '', paidAmount: '', paymentMethod: 'Cash', mpesaCode: '', payer: '', paidTo: '' });
                     }
-                    persistExpenses([exp, ...expenses]);
-                    if (paidFinal > 0) {
-                      logAudit('payment', 'expense', `${exp.id} · ${shopProfile.currency} ${paidFinal} via ${newExpense.paymentMethod || 'Cash'} (${newExpense.description || ''})`);
-                    }
-                    setNewExpense({ date: new Date().toISOString().split('T')[0], category: expenseCategories[0]?.name || 'Store Rent', description: '', amount: '', paidAmount: '', paymentMethod: 'Cash', mpesaCode: '', payer: '', paidTo: '' });
-                  } catch (err) {
-                    persistExpenses([exp, ...expenses]);
-                    if (paidFinal > 0) {
-                      logAudit('payment', 'expense', `${exp.id} · ${shopProfile.currency} ${paidFinal} via ${newExpense.paymentMethod || 'Cash'} (${newExpense.description || ''})`);
-                    }
-                    saveOfflineQueue([...(offlineQueue || []), { id: `oq-exp-${Date.now()}`, type: 'expense', payload: exp, at: new Date().toISOString(), status: 'pending', lastError: (err && err.message) || 'Offline / queued for sync' }]);
-                    setNewExpense({ date: new Date().toISOString().split('T')[0], category: expenseCategories[0]?.name || 'Store Rent', description: '', amount: '', paidAmount: '', paymentMethod: 'Cash', mpesaCode: '', payer: '', paidTo: '' });
-                  }
+                  });
                 }} className="space-y-3 text-xs">
                   <div>
                     <label className="text-[10px] text-slate-400 block mb-1">Date:</label>
@@ -9032,7 +9176,7 @@ export default function App() {
                       <div className="flex justify-between"><span className="text-slate-400">Total with tax</span><span className="text-emerald-400 font-bold">{shopProfile.currency} {(expenseTaxInclusive ? (parseFloat(newExpense.amount)||0) : ((parseFloat(newExpense.amount)||0) * (1 + taxSettings.purchaseTaxRate/100))).toLocaleString(undefined,{maximumFractionDigits:2})}</span></div>
                     </div>
                   )}
-                  <button type="submit" className="w-full py-2 bg-emerald-500 text-slate-950 font-bold rounded">Save Expense</button>
+                  <button type="submit" disabled={isBusy('exp_create')} className="w-full py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('exp_create') ? 'Saving…' : 'Save Expense'}</button>
                 </form>
               </div>
             )}
@@ -9389,8 +9533,8 @@ export default function App() {
                           <td className="py-2 px-3" onClick={e => e.stopPropagation()}>
                             {lr.status === 'Pending' && canApproveLeave(lr) && (
                               <div className="flex gap-1">
-                                <button onClick={() => handleLeaveAction(lr, 'Approved')} className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[10px] font-bold">Approve</button>
-                                <button onClick={() => handleLeaveAction(lr, 'Rejected')} className="px-2 py-0.5 bg-red-500/20 text-red-400 rounded text-[10px] font-bold">Reject</button>
+                                <button disabled={isBusy(`leave_act:${lr.id}`)} onClick={() => handleLeaveAction(lr, 'Approved')} className="px-2 py-0.5 bg-emerald-500/20 disabled:opacity-50 text-emerald-400 rounded text-[10px] font-bold">{isBusy(`leave_act:${lr.id}`) ? 'Saving…' : 'Approve'}</button>
+                                <button disabled={isBusy(`leave_act:${lr.id}`)} onClick={() => handleLeaveAction(lr, 'Rejected')} className="px-2 py-0.5 bg-red-500/20 disabled:opacity-50 text-red-400 rounded text-[10px] font-bold">Reject</button>
                               </div>
                             )}
                             {lr.status === 'Pending' && !canApproveLeave(lr) && lr.managerName && (
@@ -9457,7 +9601,7 @@ export default function App() {
                                 <SearchableSelect value={payrollPayMethod} onChange={e => setPayrollPayMethod(e.target.value)} onClick={e => e.stopPropagation()} className="bg-slate-900 border border-slate-700 rounded text-[10px] text-white mr-1 py-0.5">
                                   {paymentMethods.map(pm => <option key={pm.id} value={pm.name}>{pm.name}</option>)}
                                 </SearchableSelect>
-                                <button onClick={() => handleMarkPayrollPaid(pr, payrollPayMethod)} className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[10px] font-bold mr-1">Mark Paid</button>
+                                <button disabled={isBusy(`payroll_pay:${pr.id}`)} onClick={() => handleMarkPayrollPaid(pr, payrollPayMethod)} className="px-2 py-0.5 bg-emerald-500/20 disabled:opacity-50 text-emerald-400 rounded text-[10px] font-bold mr-1">{isBusy(`payroll_pay:${pr.id}`) ? 'Paying…' : 'Mark Paid'}</button>
                               </>
                             )}
                             <button onClick={() => {
@@ -10429,16 +10573,21 @@ export default function App() {
                       <div>
                         <label className="text-slate-500 text-[10px] block">Branch</label>
                         {finReportTab === 'branch-profitability' ? (
-                          <SearchableSelect value={finBranchId} onChange={e => setFinBranchId(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1.5 text-white">
+                          <SearchableSelect value={finBranchId} onChange={e => { setFinBranchId(e.target.value); setFinReportData(null); }} className="bg-slate-950 border border-slate-700 rounded p-1.5 text-white">
                             {hasViewAllBranchesPriv && <option value="all">All locations (compare branches)</option>}
                             {(accessibleBranches || branches || []).map(b => <option key={b.id} value={b.id}>{b.name || b.id}</option>)}
                           </SearchableSelect>
                         ) : (
-                          <SearchableSelect value={(finBranchId && finBranchId !== 'all') ? finBranchId : (strictActiveBranchId || accessibleBranches[0]?.id || '')} onChange={e => setFinBranchId(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1.5 text-white">
-                            {finBranchId === '' && strictActiveBranchId && (
-                              <option value={strictActiveBranchId}>Current ({(branches || []).find(b => String(b.id) === String(strictActiveBranchId))?.name || strictActiveBranchId})</option>
-                            )}
-                            {(accessibleBranches || []).map(b => <option key={b.id} value={b.id}>{b.name || b.id}</option>)}
+                          <SearchableSelect
+                            value={(!showAllBranchesScope && strictActiveBranchId) ? strictActiveBranchId : ((finBranchId && finBranchId !== 'all') ? finBranchId : (strictActiveBranchId || accessibleBranches[0]?.id || ''))}
+                            disabled={!showAllBranchesScope && !!strictActiveBranchId}
+                            onChange={e => { setFinBranchId(e.target.value); setFinReportData(null); }}
+                            className="bg-slate-950 border border-slate-700 rounded p-1.5 text-white disabled:opacity-70"
+                          >
+                            {(!showAllBranchesScope && strictActiveBranchId)
+                              ? (accessibleBranches || []).filter(b => String(b.id) === String(strictActiveBranchId)).map(b => <option key={b.id} value={b.id}>{b.name || b.id}</option>)
+                              : (accessibleBranches || []).map(b => <option key={b.id} value={b.id}>{b.name || b.id}</option>)
+                            }
                           </SearchableSelect>
                         )}
                       </div>
@@ -10460,7 +10609,14 @@ export default function App() {
                           <input value={finAccountCode} onChange={e => setFinAccountCode(e.target.value)} placeholder="e.g. 1000" className="bg-slate-950 border border-slate-700 rounded p-1.5 text-white w-28" />
                         </div>
                       )}
-                      <button type="button" disabled={finReportLoading} className="px-3 py-1.5 bg-emerald-500 text-slate-950 font-bold rounded text-xs" onClick={async () => {
+                      <button type="button" disabled={finReportLoading || isBusy('fin_report')} className="px-3 py-1.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded text-xs" onClick={() => runWithLock('fin_report', async () => {
+                        const effBranch = finReportTab === 'branch-profitability'
+                          ? ((finBranchId === 'all' && hasViewAllBranchesPriv) ? 'all' : (finBranchId && finBranchId !== 'all' ? finBranchId : (showAllBranchesScope ? 'all' : (strictActiveBranchId || accessibleBranches[0]?.id || ''))))
+                          : ((!showAllBranchesScope && strictActiveBranchId) ? strictActiveBranchId : ((finBranchId && finBranchId !== 'all') ? finBranchId : (strictActiveBranchId || accessibleBranches[0]?.id || '')));
+                        if (!effBranch || (finReportTab !== 'branch-profitability' && effBranch === 'all')) {
+                          alert('Please select a specific branch to run this financial report.');
+                          return;
+                        }
                         setFinReportLoading(true);
                         setFinReportData(null);
                         try {
@@ -10469,10 +10625,7 @@ export default function App() {
                           if (finFrom) q.set('from', finFrom);
                           if (finTo) q.set('to', finTo);
                           if (finGroupBy) q.set('groupBy', finGroupBy);
-                          const effBranch = finReportTab === 'branch-profitability'
-                            ? ((finBranchId === 'all' && hasViewAllBranchesPriv) ? 'all' : (finBranchId && finBranchId !== 'all' ? finBranchId : (showAllBranchesScope ? 'all' : (strictActiveBranchId || accessibleBranches[0]?.id || ''))))
-                            : ((finBranchId && finBranchId !== 'all') ? finBranchId : (strictActiveBranchId || accessibleBranches[0]?.id || ''));
-                          if (effBranch) q.set('branchId', effBranch);
+                          q.set('branchId', effBranch);
                           if (finAccountCode) q.set('accountCode', finAccountCode);
                           if (finReportTab === 'comparative') {
                             if (finCompareFrom) q.set('compareFrom', finCompareFrom);
@@ -10486,7 +10639,7 @@ export default function App() {
                           alert('Network error loading report');
                         }
                         setFinReportLoading(false);
-                      }}>{finReportLoading ? 'Loading…' : 'Run report'}</button>
+                      })}>{(finReportLoading || isBusy('fin_report')) ? 'Loading…' : 'Run report'}</button>
                       {finReportData && (
                         <button type="button" className="px-3 py-1.5 bg-slate-700 text-white text-[10px] font-bold rounded" onClick={() => {
                           let rows = [];
@@ -10938,7 +11091,7 @@ export default function App() {
                   <div className="flex items-center gap-3">
                     {shopProfile.logo ? (
                       <div className="bg-white/5 p-2 rounded-lg border border-slate-700 flex items-center justify-center h-16 w-24 shrink-0">
-                        <img src={shopProfile.logo} alt="Business Logo" className="max-h-12 max-w-[80px] object-contain" />
+                        <img src={shopProfile.logo} alt="Business Logo" loading="lazy" className="max-h-12 max-w-[80px] object-contain" />
                       </div>
                     ) : (
                       <div className="h-16 w-24 rounded-lg border-2 border-dashed border-slate-700 flex flex-col items-center justify-center text-slate-500 bg-slate-900/50 shrink-0">
@@ -11006,7 +11159,7 @@ export default function App() {
                   <input type="text" value={shopProfile.location} onChange={e => setShopProfile({...shopProfile, location: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" />
                 </div>
               </div>
-              <button onClick={handleSaveShopProfile} className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded text-xs transition-colors">Save Business Profile</button>
+              <button disabled={isBusy('shop_profile')} onClick={handleSaveShopProfile} className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold rounded text-xs transition-colors">{isBusy('shop_profile') ? 'Saving…' : 'Save Business Profile'}</button>
             </div>
                   </>
                 )}
@@ -11021,7 +11174,7 @@ export default function App() {
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
                         <input placeholder="Location name" value={branchForm.name} onChange={e => setBranchForm({ ...branchForm, name: e.target.value })} className="bg-slate-950 border border-slate-700 rounded p-2 text-white" />
                         <input placeholder="Address (optional)" value={branchForm.address} onChange={e => setBranchForm({ ...branchForm, address: e.target.value })} className="bg-slate-950 border border-slate-700 rounded p-2 text-white" />
-                        <button type="button" onClick={async () => {
+                        <button type="button" disabled={isBusy('branch_create')} onClick={() => runWithLock('branch_create', async () => {
                           if (!branchForm.name.trim()) return alert('Location name required');
                           if ((branches || []).length >= maxBranches) return alert('Location limit reached for your plan.');
                           const res = await apiFetch('/api/branches', { method: 'POST', body: JSON.stringify(branchForm) });
@@ -11030,7 +11183,7 @@ export default function App() {
                           setBranchForm({ name: '', address: '', phone: '' });
                           const r2 = await apiFetch('/api/branches');
                           if (r2.ok) { const x = await r2.json(); setBranches(x.branches || []); setMaxBranches(x.maxBranches || maxBranches); }
-                        }} className="bg-sky-500 text-slate-950 font-bold rounded px-3 py-2">Add location</button>
+                        })} className="bg-sky-500 disabled:opacity-50 text-slate-950 font-bold rounded px-3 py-2">{isBusy('branch_create') ? 'Adding…' : 'Add location'}</button>
                       </div>
                       <div className="space-y-2 max-h-80 overflow-y-auto">
                         <p className="text-[10px] text-slate-500">New locations share parent business master data (item categories, statuses, customers, suppliers, payment methods, sales terms, HR settings). Stock starts empty at the new location.</p>
@@ -11044,20 +11197,20 @@ export default function App() {
                             </div>
                             <div className="flex gap-1" onClick={e => e.stopPropagation()}>
                               {!b.isDefault && (
-                                <button type="button" className="px-2 py-1 bg-emerald-500/20 text-emerald-400 rounded text-[10px] font-bold" onClick={async () => {
+                                <button type="button" disabled={isBusy(`branch_default:${b.id}`)} className="px-2 py-1 bg-emerald-500/20 disabled:opacity-50 text-emerald-400 rounded text-[10px] font-bold" onClick={() => runWithLock(`branch_default:${b.id}`, async () => {
                                   await apiFetch('/api/branches/' + b.id, { method: 'PUT', body: JSON.stringify({ isDefault: true }) });
                                   const r2 = await apiFetch('/api/branches');
                                   if (r2.ok) { const x = await r2.json(); setBranches(x.branches || []); }
-                                }}>Set default</button>
+                                })}>{isBusy(`branch_default:${b.id}`) ? 'Updating…' : 'Set default'}</button>
                               )}
                               {(branches || []).length > 1 && (
-                                <button type="button" className="px-2 py-1 bg-red-500/20 text-red-400 rounded text-[10px] font-bold" onClick={async () => {
+                                <button type="button" disabled={isBusy(`branch_del:${b.id}`)} className="px-2 py-1 bg-red-500/20 disabled:opacity-50 text-red-400 rounded text-[10px] font-bold" onClick={() => runWithLock(`branch_del:${b.id}`, async () => {
                                   if (!confirm('Delete this location?')) return;
                                   const res = await apiFetch('/api/branches/' + b.id, { method: 'DELETE' });
                                   if (!res.ok) { const d = await res.json().catch(() => ({})); return alert(d.error || 'Failed'); }
                                   const r2 = await apiFetch('/api/branches');
                                   if (r2.ok) { const x = await r2.json(); setBranches(x.branches || []); }
-                                }}>Delete</button>
+                                })}>{isBusy(`branch_del:${b.id}`) ? 'Deleting…' : 'Delete'}</button>
                               )}
                             </div>
                           </div>
@@ -11393,7 +11546,7 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              <button onClick={handleSaveTaxSettings} className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold rounded">Save Tax Settings</button>
+              <button disabled={isBusy('tax_settings')} onClick={handleSaveTaxSettings} className="px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-xs font-bold rounded">{isBusy('tax_settings') ? 'Saving…' : 'Save Tax Settings'}</button>
             </div>
                   </>
                 )}
@@ -11431,7 +11584,7 @@ export default function App() {
                   <input type="text" value={(hrSettings.departments || []).join(', ')} onChange={e => setHrSettings({...hrSettings, departments: e.target.value.split(',').map(s => s.trim()).filter(Boolean)})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" />
                 </div>
               </div>
-              <button onClick={handleSaveHrSettings} className="px-4 py-2 bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-bold rounded">Save HR Settings</button>
+              <button disabled={isBusy('hr_settings')} onClick={handleSaveHrSettings} className="px-4 py-2 bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 text-xs font-bold rounded">{isBusy('hr_settings') ? 'Saving…' : 'Save HR Settings'}</button>
             </div>
                   </>
                 )}
@@ -11680,7 +11833,7 @@ export default function App() {
                           <input type="number" step="0.01" value={bankRecForm.statementBalance} onChange={e => setBankRecForm({ ...bankRecForm, statementBalance: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" placeholder="0" />
                         </div>
                         <div className="flex items-end">
-                          <button type="button" className="w-full py-2 bg-sky-500 text-slate-950 font-bold rounded text-xs" onClick={async () => {
+                          <button type="button" disabled={isBusy('bankrec_create')} className="w-full py-2 bg-sky-500 disabled:opacity-50 text-slate-950 font-bold rounded text-xs" onClick={() => runWithLock('bankrec_create', async () => {
                             const res = await apiFetch('/api/bank-reconciliations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bankRecForm) });
                             const d = await res.json().catch(() => ({}));
                             if (!res.ok) return alert(d.error || 'Failed');
@@ -11690,7 +11843,7 @@ export default function App() {
                               const det = await apiFetch('/api/bank-reconciliations/' + d.id);
                               if (det.ok) setBankRecDetail(await det.json());
                             }
-                          }}>Create</button>
+                          })}>{isBusy('bankrec_create') ? 'Creating…' : 'Create'}</button>
                         </div>
                       </div>
                     </div>
@@ -11707,17 +11860,17 @@ export default function App() {
                             <span className={`ml-2 font-bold ${r.status === 'closed' ? 'text-emerald-400' : 'text-amber-400'}`}>{r.status}</span>
                           </div>
                           <div className="flex gap-1">
-                            <button type="button" className="px-2 py-1 bg-sky-500/20 text-sky-400 rounded text-[10px] font-bold" onClick={async () => {
+                            <button type="button" disabled={isBusy(`bankrec_open:${r.id}`)} className="px-2 py-1 bg-sky-500/20 disabled:opacity-50 text-sky-400 rounded text-[10px] font-bold" onClick={() => runWithLock(`bankrec_open:${r.id}`, async () => {
                               const det = await apiFetch('/api/bank-reconciliations/' + r.id);
                               if (det.ok) setBankRecDetail(await det.json());
-                            }}>Open</button>
+                            })}>{isBusy(`bankrec_open:${r.id}`) ? 'Opening…' : 'Open'}</button>
                             {r.status !== 'closed' && (
-                              <button type="button" className="px-2 py-1 bg-red-500/20 text-red-400 rounded text-[10px] font-bold" onClick={async () => {
+                              <button type="button" disabled={isBusy(`bankrec_del:${r.id}`)} className="px-2 py-1 bg-red-500/20 disabled:opacity-50 text-red-400 rounded text-[10px] font-bold" onClick={() => runWithLock(`bankrec_del:${r.id}`, async () => {
                                 if (!confirm('Delete this open reconciliation?')) return;
                                 await apiFetch('/api/bank-reconciliations/' + r.id, { method: 'DELETE' });
                                 setBankRecList((bankRecList || []).filter(x => x.id !== r.id));
                                 if (bankRecDetail?.reconciliation?.id === r.id) setBankRecDetail(null);
-                              }}>Delete</button>
+                              })}>{isBusy(`bankrec_del:${r.id}`) ? 'Deleting…' : 'Delete'}</button>
                             )}
                           </div>
                         </div>
@@ -11738,24 +11891,24 @@ export default function App() {
                           </div>
                           <div className="flex flex-wrap gap-1">
                             {bankRecDetail.reconciliation.status !== 'closed' && (
-                              <>
-                                <button type="button" className="px-2 py-1 bg-emerald-500/20 text-emerald-400 text-[10px] font-bold rounded" onClick={async () => {
-                                  const res = await apiFetch('/api/bank-auto-match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reconciliationId: bankRecDetail.reconciliation.id }) });
-                                  const d = await res.json().catch(() => ({}));
-                                  alert(res.ok ? `Auto-matched ${d.matched || 0} line(s)` : (d.error || 'Failed'));
-                                  const det = await apiFetch('/api/bank-reconciliations/' + bankRecDetail.reconciliation.id);
-                                  if (det.ok) setBankRecDetail(await det.json());
-                                }}>Auto-match by amount</button>
-                                <button type="button" className="px-2 py-1 bg-amber-500 text-slate-950 text-[10px] font-bold rounded" onClick={async () => {
-                                  if (!confirm('Close this reconciliation? You can still view it.')) return;
-                                  await apiFetch('/api/bank-reconciliations/' + bankRecDetail.reconciliation.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'closed' }) });
-                                  const det = await apiFetch('/api/bank-reconciliations/' + bankRecDetail.reconciliation.id);
-                                  if (det.ok) setBankRecDetail(await det.json());
-                                  const r2 = await apiFetch('/api/bank-reconciliations');
-                                  if (r2.ok) { const x = await r2.json(); setBankRecList(x.reconciliations || []); }
-                                }}>Close reconciliation</button>
-                              </>
-                            )}
+                                <>
+                                  <button type="button" disabled={isBusy('bankrec_auto')} className="px-2 py-1 bg-emerald-500/20 disabled:opacity-50 text-emerald-400 text-[10px] font-bold rounded" onClick={() => runWithLock('bankrec_auto', async () => {
+                                    const res = await apiFetch('/api/bank-auto-match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reconciliationId: bankRecDetail.reconciliation.id }) });
+                                    const d = await res.json().catch(() => ({}));
+                                    alert(res.ok ? `Auto-matched ${d.matched || 0} line(s)` : (d.error || 'Failed'));
+                                    const det = await apiFetch('/api/bank-reconciliations/' + bankRecDetail.reconciliation.id);
+                                    if (det.ok) setBankRecDetail(await det.json());
+                                  })}>{isBusy('bankrec_auto') ? 'Matching…' : 'Auto-match by amount'}</button>
+                                  <button type="button" disabled={isBusy('bankrec_close')} className="px-2 py-1 bg-amber-500 disabled:opacity-50 text-slate-950 text-[10px] font-bold rounded" onClick={() => runWithLock('bankrec_close', async () => {
+                                    if (!confirm('Close this reconciliation? You can still view it.')) return;
+                                    await apiFetch('/api/bank-reconciliations/' + bankRecDetail.reconciliation.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'closed' }) });
+                                    const det = await apiFetch('/api/bank-reconciliations/' + bankRecDetail.reconciliation.id);
+                                    if (det.ok) setBankRecDetail(await det.json());
+                                    const r2 = await apiFetch('/api/bank-reconciliations');
+                                    if (r2.ok) { const x = await r2.json(); setBankRecList(x.reconciliations || []); }
+                                  })}>{isBusy('bankrec_close') ? 'Closing…' : 'Close reconciliation'}</button>
+                                </>
+                              )}
                             <button type="button" className="px-2 py-1 bg-slate-800 text-slate-300 text-[10px] font-bold rounded" onClick={() => setBankRecDetail(null)}>Close panel</button>
                           </div>
                         </div>
@@ -11774,14 +11927,14 @@ export default function App() {
                               <label className="text-slate-500 text-[10px]">Amount (+ in / − out)</label>
                               <input type="number" step="0.01" value={bankLineForm.amount} onChange={e => setBankLineForm({ ...bankLineForm, amount: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" />
                             </div>
-                            <button type="button" className="py-2 bg-sky-500 text-slate-950 font-bold rounded text-xs" onClick={async () => {
+                            <button type="button" disabled={isBusy('bankrec_line')} className="py-2 bg-sky-500 disabled:opacity-50 text-slate-950 font-bold rounded text-xs" onClick={() => runWithLock('bankrec_line', async () => {
                               if (!bankLineForm.description && !bankLineForm.amount) return alert('Enter description and amount');
                               const res = await apiFetch('/api/bank-statement-lines', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reconciliationId: bankRecDetail.reconciliation.id, ...bankLineForm }) });
                               if (!res.ok) { const d = await res.json().catch(() => ({})); return alert(d.error || 'Failed'); }
                               setBankLineForm({ lineDate: bankRecForm.statementDate || new Date().toISOString().slice(0,10), description: '', amount: '' });
                               const det = await apiFetch('/api/bank-reconciliations/' + bankRecDetail.reconciliation.id);
                               if (det.ok) setBankRecDetail(await det.json());
-                            }}>Add statement line</button>
+                            })}>{isBusy('bankrec_line') ? 'Adding…' : 'Add statement line'}</button>
                           </div>
                         )}
 
@@ -11798,20 +11951,20 @@ export default function App() {
                                   </div>
                                   <div className="flex gap-1 mt-1">
                                     {sl.matched ? (
-                                      <button type="button" className="text-amber-400 font-bold" onClick={async () => {
+                                      <button type="button" disabled={isBusy(`bankrec_unmatch:${sl.id}`)} className="text-amber-400 disabled:opacity-50 font-bold" onClick={() => runWithLock(`bankrec_unmatch:${sl.id}`, async () => {
                                         await apiFetch('/api/bank-statement-lines/' + sl.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ unmatch: true }) });
                                         const det = await apiFetch('/api/bank-reconciliations/' + bankRecDetail.reconciliation.id);
                                         if (det.ok) setBankRecDetail(await det.json());
-                                      }}>Unmatch</button>
+                                      })}>Unmatch</button>
                                     ) : (
                                       <span className="text-slate-500">Select a book line → Match</span>
                                     )}
                                     {bankRecDetail.reconciliation.status !== 'closed' && !sl.matched && (
-                                      <button type="button" className="text-red-400 font-bold ml-auto" onClick={async () => {
+                                      <button type="button" disabled={isBusy(`bankrec_rm:${sl.id}`)} className="text-red-400 disabled:opacity-50 font-bold ml-auto" onClick={() => runWithLock(`bankrec_rm:${sl.id}`, async () => {
                                         await apiFetch('/api/bank-statement-lines/' + sl.id, { method: 'DELETE' });
                                         const det = await apiFetch('/api/bank-reconciliations/' + bankRecDetail.reconciliation.id);
                                         if (det.ok) setBankRecDetail(await det.json());
-                                      }}>Remove</button>
+                                      })}>Remove</button>
                                     )}
                                   </div>
                                 </div>
@@ -11831,12 +11984,12 @@ export default function App() {
                                     <div className="mt-1 flex flex-wrap gap-1">
                                       <span className="text-slate-500">Match to unmatched statement:</span>
                                       {(bankRecDetail.statementLines || []).filter(s => !s.matched).map(s => (
-                                        <button key={s.id} type="button" className="px-1.5 py-0.5 bg-sky-500/20 text-sky-400 rounded font-bold" onClick={async () => {
+                                        <button key={s.id} type="button" disabled={isBusy(`bankrec_match:${s.id}:${bl.id}`)} className="px-1.5 py-0.5 bg-sky-500/20 disabled:opacity-50 text-sky-400 rounded font-bold" onClick={() => runWithLock(`bankrec_match:${s.id}:${bl.id}`, async () => {
                                           const res = await apiFetch('/api/bank-statement-lines/' + s.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ matchJournalLineId: bl.id }) });
                                           if (!res.ok) { const d = await res.json().catch(() => ({})); return alert(d.error || 'Match failed'); }
                                           const det = await apiFetch('/api/bank-reconciliations/' + bankRecDetail.reconciliation.id);
                                           if (det.ok) setBankRecDetail(await det.json());
-                                        }}>{(Number(s.amount)||0).toLocaleString()}</button>
+                                        })}>{(Number(s.amount)||0).toLocaleString()}</button>
                                       ))}
                                     </div>
                                   )}
@@ -12011,43 +12164,46 @@ export default function App() {
         <div className="fixed inset-0 bg-slate-950/80 flex items-center justify-center z-[60] p-3 sm:p-4 overflow-y-auto">
           <div className="bg-slate-900 border border-slate-700 p-4 sm:p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto my-auto">
             <div className="flex justify-between items-center border-b border-slate-800 pb-2"><h4 className="font-bold text-white text-sm">My User Profile</h4><button onClick={() => setUserProfileModalOpen(false)} className="text-slate-400">✕</button></div>
-            <form className="space-y-3 text-xs" onSubmit={async e => {
-              e.preventDefault(); if (!currentUser) return;
-              const name = profileNameDraft.trim();
-              if (!name) { alert('Please enter your name.'); return; }
-              try {
-                const payload = {
-                  id: currentUser.id,
-                  name,
-                  role: currentUser.role,
-                  phone: currentUser.phone || '',
-                  status: currentUser.status || 'Active',
-                  photo: profileImage || ''
-                };
-                const response = await apiFetch(`/api/users/${currentUser.id}`, {
-                  method: 'PUT',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(payload)
-                });
-                const data = await response.json().catch(() => ({}));
-                if (!response.ok) {
-                  alert(data.error || 'Could not save your profile to the database.');
-                  return;
+            <form className="space-y-3 text-xs" onSubmit={e => {
+              e.preventDefault();
+              runWithLock('profile_save', async () => {
+                if (!currentUser) return;
+                const name = profileNameDraft.trim();
+                if (!name) { alert('Please enter your name.'); return; }
+                try {
+                  const payload = {
+                    id: currentUser.id,
+                    name,
+                    role: currentUser.role,
+                    phone: currentUser.phone || '',
+                    status: currentUser.status || 'Active',
+                    photo: profileImage || ''
+                  };
+                  const response = await apiFetch(`/api/users/${currentUser.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                  });
+                  const data = await response.json().catch(() => ({}));
+                  if (!response.ok) {
+                    alert(data.error || 'Could not save your profile to the database.');
+                    return;
+                  }
+                  const updatedUser = { ...currentUser, name, photo: profileImage || '', ...(data.user || {}) };
+                  setUsers(prev => (prev || []).map(u => u.id === updatedUser.id ? { ...u, ...updatedUser } : u));
+                  setCurrentUser(updatedUser);
+                  try { localStorage.setItem('erp_current_user', JSON.stringify(updatedUser)); } catch (_) {}
+                  setUserProfileModalOpen(false);
+                  alert('Profile saved successfully.');
+                } catch {
+                  alert('Could not save your profile. Please try again.');
                 }
-                const updatedUser = { ...currentUser, name, photo: profileImage || '', ...(data.user || {}) };
-                setUsers(prev => (prev || []).map(u => u.id === updatedUser.id ? { ...u, ...updatedUser } : u));
-                setCurrentUser(updatedUser);
-                try { localStorage.setItem('erp_current_user', JSON.stringify(updatedUser)); } catch (_) {}
-                setUserProfileModalOpen(false);
-                alert('Profile saved successfully.');
-              } catch {
-                alert('Could not save your profile. Please try again.');
-              }
+              });
             }}>
-              <div className="flex items-center gap-3"><div className="w-16 h-16 rounded-full overflow-hidden bg-slate-800 border border-slate-700 flex items-center justify-center">{profileImage ? <img src={profileImage} alt="Profile" className="w-full h-full object-cover" /> : <span className="text-xl font-bold text-emerald-400">{(profileNameDraft || 'U').trim().charAt(0).toUpperCase()}</span>}</div><label className="flex-1"><span className="block text-slate-400 mb-1">Profile image</span><input type="file" accept="image/*" className="w-full text-slate-300" onChange={async e => { const file = e.target.files?.[0]; if (!file) return; if (file.size > 5 * 1024 * 1024) { alert('Please choose an image smaller than 5 MB (it will be compressed).'); e.target.value = ''; return; } try { const dataUrl = await compressProfileImage(file, 256, 0.72); setProfileImage(dataUrl); } catch (_) { alert('Could not process image. Try a different file.'); } e.target.value = ''; }} /><span className="text-[10px] text-slate-500 mt-0.5 block">Auto-resized to max 256px JPEG for fast DB storage.</span></label></div>
+              <div className="flex items-center gap-3"><div className="w-16 h-16 rounded-full overflow-hidden bg-slate-800 border border-slate-700 flex items-center justify-center">{profileImage ? <img src={profileImage} alt="Profile" loading="lazy" className="w-full h-full object-cover" /> : <span className="text-xl font-bold text-emerald-400">{(profileNameDraft || 'U').trim().charAt(0).toUpperCase()}</span>}</div><label className="flex-1"><span className="block text-slate-400 mb-1">Profile image</span><input type="file" accept="image/*" className="w-full text-slate-300" onChange={async e => { const file = e.target.files?.[0]; if (!file) return; if (file.size > 5 * 1024 * 1024) { alert('Please choose an image smaller than 5 MB (it will be compressed).'); e.target.value = ''; return; } try { const dataUrl = await compressProfileImage(file, 256, 0.72); setProfileImage(dataUrl); } catch (_) { alert('Could not process image. Try a different file.'); } e.target.value = ''; }} /><span className="text-[10px] text-slate-500 mt-0.5 block">Auto-resized to max 256px JPEG for fast DB storage.</span></label></div>
               <label className="block"><span className="block text-slate-400 mb-1">Full name</span><input value={profileNameDraft} onChange={e => setProfileNameDraft(e.target.value)} required className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /></label>
               <p className="text-slate-500">Role: {currentUser?.role || '—'}</p>
-              <div className="flex gap-2"><button type="submit" className="flex-1 py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Save Profile</button><button type="button" onClick={() => { setUserProfileModalOpen(false); setChangePasswordModalOpen(true); }} className="flex-1 py-2.5 bg-slate-700 text-white font-bold rounded">Change Password</button></div>
+              <div className="flex gap-2"><button type="submit" disabled={isBusy('profile_save')} className="flex-1 py-2.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('profile_save') ? 'Saving…' : 'Save Profile'}</button><button type="button" onClick={() => { setUserProfileModalOpen(false); setChangePasswordModalOpen(true); }} className="flex-1 py-2.5 bg-slate-700 text-white font-bold rounded">Change Password</button></div>
             </form>
             <div className="space-y-2 border-t border-slate-800 pt-3">
               <p className="text-[10px] font-bold text-slate-400 uppercase">Change PIN</p>
@@ -12055,7 +12211,7 @@ export default function App() {
               <input type="password" placeholder="New PIN (min 4)" value={profilePinNew} onChange={e => setProfilePinNew(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs" />
               <input type="password" placeholder="Confirm new PIN" value={profilePinConfirm} onChange={e => setProfilePinConfirm(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs" />
               {profilePinNew && <p className={`text-[10px] ${pinStrength(profilePinNew).score >= 2 ? 'text-emerald-400' : 'text-amber-400'}`}>Strength: {pinStrength(profilePinNew).label}</p>}
-              <button type="button" onClick={async () => {
+              <button type="button" disabled={isBusy('pin_update')} onClick={() => runWithLock('pin_update', async () => {
                 if (profilePinNew !== profilePinConfirm) { alert('New PIN and confirm do not match.'); return; }
                 const st = pinStrength(profilePinNew);
                 if (!st.ok) { alert(st.label); return; }
@@ -12073,7 +12229,7 @@ export default function App() {
                 } catch (e) {
                   alert('Network error updating PIN.');
                 }
-              }} className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded">Update PIN</button>
+              })} className="w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white text-xs font-bold rounded">{isBusy('pin_update') ? 'Updating…' : 'Update PIN'}</button>
             </div>
           </div>
         </div>
@@ -12087,39 +12243,41 @@ export default function App() {
               <h4 className="font-bold text-white text-sm">Change My Password / PIN</h4>
               <button onClick={() => setChangePasswordModalOpen(false)} className="text-slate-400">✕</button>
             </div>
-            <form onSubmit={async (e) => {
+            <form onSubmit={e => {
               e.preventDefault();
-              if (!currentUser) {
-                alert('No active user session found.');
-                return;
-              }
-              if (!selfOldPassword) {
-                alert('Enter your current PIN.');
-                return;
-              }
-              if (!selfNewPassword || selfNewPassword.length < 4) {
-                alert('New PIN must be at least 4 characters.');
-                return;
-              }
-              try {
-                const response = await apiFetch('/api/change-pin', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ currentPin: selfOldPassword, newPin: selfNewPassword })
-                });
-                const data = await response.json().catch(() => ({}));
-                if (!response.ok) {
-                  alert(data.error || 'Could not update PIN on the server.');
+              runWithLock('self_pw', async () => {
+                if (!currentUser) {
+                  alert('No active user session found.');
                   return;
                 }
-                alert('Your password/PIN has been successfully updated!');
-                setChangePasswordModalOpen(false);
-                setSelfOldPassword('');
-                setSelfNewPassword('');
-              } catch (err) {
-                console.error(err);
-                alert('Network error updating PIN. Please try again.');
-              }
+                if (!selfOldPassword) {
+                  alert('Enter your current PIN.');
+                  return;
+                }
+                if (!selfNewPassword || selfNewPassword.length < 4) {
+                  alert('New PIN must be at least 4 characters.');
+                  return;
+                }
+                try {
+                  const response = await apiFetch('/api/change-pin', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ currentPin: selfOldPassword, newPin: selfNewPassword })
+                  });
+                  const data = await response.json().catch(() => ({}));
+                  if (!response.ok) {
+                    alert(data.error || 'Could not update PIN on the server.');
+                    return;
+                  }
+                  alert('Your password/PIN has been successfully updated!');
+                  setChangePasswordModalOpen(false);
+                  setSelfOldPassword('');
+                  setSelfNewPassword('');
+                } catch (err) {
+                  console.error(err);
+                  alert('Network error updating PIN. Please try again.');
+                }
+              });
             }} className="space-y-3 text-xs">
               <div>
                 <label className="text-slate-400 block mb-1">Current Password / PIN</label>
@@ -12129,7 +12287,7 @@ export default function App() {
                 <label className="text-slate-400 block mb-1">New Password / PIN</label>
                 <input type="password" value={selfNewPassword} onChange={e => setSelfNewPassword(e.target.value)} required placeholder="••••" className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white font-mono" />
               </div>
-              <button type="submit" className="w-full py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Update Password</button>
+              <button type="submit" disabled={isBusy('self_pw')} className="w-full py-2.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('self_pw') ? 'Updating…' : 'Update Password'}</button>
             </form>
           </div>
         </div>
@@ -12234,7 +12392,7 @@ export default function App() {
                   </div>
                 )}
               </div>
-              <button type="submit" className="w-full py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Save Customer</button>
+              <button type="submit" disabled={isBusy('cust_create')} className="w-full py-2.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('cust_create') ? 'Saving…' : 'Save Customer'}</button>
             </form>
           </div>
         </div>
@@ -12403,7 +12561,7 @@ export default function App() {
                   })}
                 </div>
               </div>
-              <button type="submit" className="w-full py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Save & Create User</button>
+              <button type="submit" disabled={isBusy('user_create')} className="w-full py-2.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('user_create') ? 'Saving…' : 'Save & Create User'}</button>
             </form>
           </div>
         </div>
@@ -12422,7 +12580,7 @@ export default function App() {
                 <input type="text" placeholder="e.g. Supervisor" value={newRoleForm.name} onChange={e => setNewRoleForm({...newRoleForm, name: e.target.value})} required className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" />
               </div>
               <p className="text-[11px] text-slate-400">Note: You can configure detailed tab and CRUD permissions right after creating the role.</p>
-              <button type="submit" className="w-full py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Create Role</button>
+              <button type="submit" disabled={isBusy('role_create')} className="w-full py-2.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('role_create') ? 'Creating…' : 'Create Role'}</button>
             </form>
           </div>
         </div>
@@ -12447,7 +12605,7 @@ export default function App() {
                   <option value="Inactive">Inactive</option>
                 </SearchableSelect>
               </div>
-              <button type="submit" className="w-full py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Save Category</button>
+              <button type="submit" disabled={isBusy('cat_create')} className="w-full py-2.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('cat_create') ? 'Saving…' : 'Save Category'}</button>
             </form>
           </div>
         </div>
@@ -12472,7 +12630,7 @@ export default function App() {
                   <option value="no">No (Restricts Sale)</option>
                 </SearchableSelect>
               </div>
-              <button type="submit" className="w-full py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Save Status</button>
+              <button type="submit" disabled={isBusy('status_create')} className="w-full py-2.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('status_create') ? 'Saving…' : 'Save Status'}</button>
             </form>
           </div>
         </div>
@@ -12749,12 +12907,12 @@ export default function App() {
                     }} />
                   </label>
                   {itemForm.photoUrl && (
-                    <img src={itemForm.photoUrl} alt="" className="w-10 h-10 rounded object-cover border border-slate-700" />
+                    <img src={itemForm.photoUrl} alt="" loading="lazy" className="w-10 h-10 rounded object-cover border border-slate-700" />
                   )}
                 </div>
                 <p className="text-[10px] text-amber-300/90">Tip: Both options work — uploaded photos are auto-compressed (~15–25 KB) to protect database speed, though pasting an external image URL link remains the fastest best practice.</p>
               </div>
-              <button type="submit" className="w-full py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Save Item</button>
+              <button type="submit" disabled={isBusy('item_create')} className="w-full py-2.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('item_create') ? 'Saving…' : 'Save Item'}</button>
             </form>
           </div>
         </div>
@@ -12971,14 +13129,14 @@ export default function App() {
                     }} />
                   </label>
                   {selectedInventoryItem.photoUrl && (
-                    <img src={selectedInventoryItem.photoUrl} alt="" className="w-10 h-10 rounded object-cover border border-slate-700" />
+                    <img src={selectedInventoryItem.photoUrl} alt="" loading="lazy" className="w-10 h-10 rounded object-cover border border-slate-700" />
                   )}
                 </div>
                 <p className="text-[10px] text-amber-300/90">Tip: Uploaded photos are auto-compressed (~15–25 KB) to keep the database fast, though using an image URL link is recommended as best practice.</p>
               </div>
               <div className="flex flex-wrap gap-2 pt-2">
                 {(isAdminUser || privileges.inventory?.update) && (
-                  <button onClick={() => handleSaveInventory(selectedInventoryItem)} className="flex-1 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded text-xs transition-colors cursor-pointer">Save Changes</button>
+                  <button disabled={isBusy('inv_save')} onClick={() => handleSaveInventory(selectedInventoryItem)} className="flex-1 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold rounded text-xs transition-colors cursor-pointer">{isBusy('inv_save') ? 'Saving…' : 'Save Changes'}</button>
                 )}
                 <button
                   type="button"
@@ -12990,7 +13148,7 @@ export default function App() {
                   <span>Duplicate Item</span>
                 </button>
                 {(isAdminUser || privileges.inventory?.delete) && (
-                  <button onClick={() => handleDeleteInventory(selectedInventoryItem.id)} className="py-2 px-3 bg-red-500/20 hover:bg-red-500/30 text-red-400 font-bold rounded text-xs transition-colors cursor-pointer">Delete</button>
+                  <button disabled={isBusy('inv_del')} onClick={() => handleDeleteInventory(selectedInventoryItem.id)} className="py-2 px-3 bg-red-500/20 hover:bg-red-500/30 disabled:opacity-50 text-red-400 font-bold rounded text-xs transition-colors cursor-pointer">{isBusy('inv_del') ? 'Deleting…' : 'Delete'}</button>
                 )}
                 {(!isAdminUser && !privileges.inventory?.update && !privileges.inventory?.delete) && (
                   <button onClick={() => setSelectedInventoryItem(null)} className="w-full py-2 bg-slate-800 text-white font-bold rounded text-xs cursor-pointer">Close</button>
@@ -13096,10 +13254,10 @@ export default function App() {
               </div>
               <div className="flex gap-2 pt-2">
                 {(isAdminUser || privileges.customers?.update) && (
-                  <button onClick={() => handleSaveCustomer(selectedCustomer)} className="flex-1 py-2 bg-emerald-500 text-slate-950 font-bold rounded">Save Changes</button>
+                  <button disabled={isBusy('cust_save')} onClick={() => handleSaveCustomer(selectedCustomer)} className="flex-1 py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('cust_save') ? 'Saving…' : 'Save Changes'}</button>
                 )}
                 {(isAdminUser || privileges.customers?.delete) && (
-                  <button onClick={() => handleDeleteCustomer(selectedCustomer.id)} className="py-2 px-4 bg-red-500/20 text-red-400 font-bold rounded">Delete</button>
+                  <button disabled={isBusy('cust_del')} onClick={() => handleDeleteCustomer(selectedCustomer.id)} className="py-2 px-4 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('cust_del') ? 'Deleting…' : 'Delete'}</button>
                 )}
                 {(!isAdminUser && !privileges.customers?.update && !privileges.customers?.delete) && (
                   <button onClick={() => setSelectedCustomer(null)} className="w-full py-2 bg-slate-800 text-white font-bold rounded">Close</button>
@@ -13174,7 +13332,7 @@ export default function App() {
               )}
               <div className="flex flex-wrap gap-2 pt-2">
                 {(isAdminUser || privileges.expenses?.update) && (
-                  <button onClick={() => handleSaveExpense(selectedExpenseItem)} className="flex-1 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded text-xs transition-colors cursor-pointer">Save Changes</button>
+                  <button disabled={isBusy('exp_save')} onClick={() => handleSaveExpense(selectedExpenseItem)} className="flex-1 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold rounded text-xs transition-colors cursor-pointer">{isBusy('exp_save') ? 'Saving…' : 'Save Changes'}</button>
                 )}
                 <button
                   type="button"
@@ -13199,7 +13357,7 @@ export default function App() {
                   <span>Duplicate</span>
                 </button>
                 {(isAdminUser || privileges.expenses?.delete) && (
-                  <button onClick={() => handleDeleteExpense(selectedExpenseItem.id)} className="py-2 px-4 bg-red-500/20 hover:bg-red-500/30 text-red-400 font-bold rounded text-xs transition-colors cursor-pointer">Delete Expense</button>
+                  <button disabled={isBusy('exp_del')} onClick={() => handleDeleteExpense(selectedExpenseItem.id)} className="py-2 px-4 bg-red-500/20 hover:bg-red-500/30 disabled:opacity-50 text-red-400 font-bold rounded text-xs transition-colors cursor-pointer">{isBusy('exp_del') ? 'Deleting…' : 'Delete Expense'}</button>
                 )}
                 {(!isAdminUser && !privileges.expenses?.update && !privileges.expenses?.delete) && (
                   <button onClick={() => setSelectedExpenseItem(null)} className="w-full py-2 bg-slate-800 text-white font-bold rounded text-xs cursor-pointer">Close</button>
@@ -13324,8 +13482,9 @@ export default function App() {
                     <label className="text-[10px] text-emerald-400 block mb-1">M-Pesa Transaction Number (TXN No):</label>
                     <input id="update-mpesa-code" type="text" defaultValue={selectedSaleItem.mpesaCode && selectedSaleItem.mpesaCode !== 'N/A' ? selectedSaleItem.mpesaCode : ''} placeholder="e.g. QH7X..." className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-white" />
                   </div>
-                  <button 
-                    onClick={async () => {
+                  <button
+                    disabled={isBusy('sale_pay')}
+                    onClick={() => runWithLock('sale_pay', async () => {
                       const addInput = document.getElementById('update-additional-paid').value;
                       const method = document.getElementById('update-pay-method').value;
                       const totalAmt = parseFloat(selectedSaleItem.totalAmount) || 0;
@@ -13441,10 +13600,10 @@ export default function App() {
                         console.error(err);
                         alert('Network error updating payment.');
                       }
-                    }}
-                    className="w-full mt-2 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded"
+                    })}
+                    className="w-full mt-2 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold rounded"
                   >
-                    Apply Payment &amp; Update Status
+                    {isBusy('sale_pay') ? 'Applying Payment…' : 'Apply Payment & Update Status'}
                   </button>
                 </div>
               )}
@@ -13463,7 +13622,7 @@ export default function App() {
               <div className="flex gap-2 pt-2">
                 <button onClick={() => setSelectedSaleItem(null)} className="flex-1 py-2 bg-slate-800 text-white font-bold rounded">Close</button>
                 {(isAdminUser || privileges.sales?.delete) && (
-                  <button onClick={() => handleDeleteSale(selectedSaleItem.id)} className="py-2 px-4 bg-red-500/20 text-red-400 font-bold rounded">Void / Delete Sale</button>
+                  <button disabled={isBusy('sale_del')} onClick={() => handleDeleteSale(selectedSaleItem.id)} className="py-2 px-4 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('sale_del') ? 'Voiding…' : 'Void / Delete Sale'}</button>
                 )}
               </div>
             </div>
@@ -13511,8 +13670,8 @@ export default function App() {
                 </div>
               </div>
               <div className="flex gap-2 pt-2">
-                <button onClick={() => handleSaveUser(selectedUser)} className="flex-1 py-2 bg-emerald-500 text-slate-950 font-bold rounded">Save Changes</button>
-                <button onClick={() => handleDeleteUser(selectedUser.id)} className="py-2 px-4 bg-red-500/20 text-red-400 font-bold rounded">Delete</button>
+                <button disabled={isBusy('user_save')} onClick={() => handleSaveUser(selectedUser)} className="flex-1 py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('user_save') ? 'Saving…' : 'Save Changes'}</button>
+                <button disabled={isBusy('user_del')} onClick={() => handleDeleteUser(selectedUser.id)} className="py-2 px-4 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('user_del') ? 'Deleting…' : 'Delete'}</button>
               </div>
             </div>
           </div>
@@ -13667,8 +13826,8 @@ export default function App() {
                 <p className="text-[10px] text-slate-500 mt-2">Order: View · View Own · Create · Update · Delete. Report sections: only the section View checkbox shows/hides that block. Turning View on a Report parent (e.g. Report · Sales) sets all its sections the same. Reports (all) opens every report tab but section boxes still control each block.</p>
               </div>
               <div className="flex gap-2 pt-2">
-                <button onClick={() => handleSaveRole(selectedRole)} className="flex-1 py-2.5 bg-emerald-500 text-slate-950 font-bold rounded">Save Privileges</button>
-                <button onClick={() => handleDeleteRole(selectedRole.id)} className="py-2.5 px-4 bg-red-500/20 text-red-400 font-bold rounded">Delete Role</button>
+                <button disabled={isBusy('role_save')} onClick={() => handleSaveRole(selectedRole)} className="flex-1 py-2.5 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('role_save') ? 'Saving…' : 'Save Privileges'}</button>
+                <button disabled={isBusy('role_del')} onClick={() => handleDeleteRole(selectedRole.id)} className="py-2.5 px-4 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('role_del') ? 'Deleting…' : 'Delete Role'}</button>
               </div>
             </div>
           </div>
@@ -13685,8 +13844,8 @@ export default function App() {
             <div className="space-y-3 text-xs">
               <div><label className="text-slate-400 block mb-1">Category Name</label><input type="text" value={selectedCategory.name} onChange={e => setSelectedCategory({...selectedCategory, name: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /></div>
               <div className="flex gap-2 pt-2">
-                <button onClick={() => handleSaveCategory(selectedCategory)} className="flex-1 py-2 bg-emerald-500 text-slate-950 font-bold rounded">Save Changes</button>
-                <button onClick={() => handleDeleteCategory(selectedCategory.id)} className="py-2 px-4 bg-red-500/20 text-red-400 font-bold rounded">Delete</button>
+                <button disabled={isBusy('cat_save')} onClick={() => handleSaveCategory(selectedCategory)} className="flex-1 py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('cat_save') ? 'Saving…' : 'Save Changes'}</button>
+                <button disabled={isBusy('cat_del')} onClick={() => handleDeleteCategory(selectedCategory.id)} className="py-2 px-4 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('cat_del') ? 'Deleting…' : 'Delete'}</button>
               </div>
             </div>
           </div>
@@ -13700,27 +13859,30 @@ export default function App() {
               <h4 className="font-bold text-white text-sm">Add New Expense Category</h4>
               <button onClick={() => setAddExpenseCategoryModalOpen(false)} className="text-slate-400">✕</button>
             </div>
-            <form onSubmit={async e => {
+            <form onSubmit={e => {
               e.preventDefault();
-              const name = e.target.catName.value;
-              if (!name) return;
-              const newCat = { id: `expcat-${Date.now()}`, name, status: 'Active' };
-              try {
-                const res = await apiFetch('/api/expense-categories', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(newCat)
-                });
-                if (res.ok) {
-                  setExpenseCategories([...expenseCategories, newCat]);
-                  setAddExpenseCategoryModalOpen(false);
-                } else {
-                  alert('Failed to save expense category.');
-                }
-              } catch (err) { console.error(err); }
+              const formEl = e.target;
+              const name = formEl.catName.value;
+              runWithLock('expcat_create', async () => {
+                if (!name) return;
+                const newCat = { id: `expcat-${Date.now()}`, name, status: 'Active' };
+                try {
+                  const res = await apiFetch('/api/expense-categories', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(newCat)
+                  });
+                  if (res.ok) {
+                    setExpenseCategories([...expenseCategories, newCat]);
+                    setAddExpenseCategoryModalOpen(false);
+                  } else {
+                    alert('Failed to save expense category.');
+                  }
+                } catch (err) { console.error(err); }
+              });
             }} className="space-y-3 text-xs">
               <div><label className="text-slate-400 block mb-1">Category Name</label><input type="text" name="catName" placeholder="e.g., Marketing" required className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /></div>
-              <button type="submit" className="w-full py-2 bg-emerald-500 text-slate-950 font-bold rounded">Save Expense Category</button>
+              <button type="submit" disabled={isBusy('expcat_create')} className="w-full py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('expcat_create') ? 'Saving…' : 'Save Expense Category'}</button>
             </form>
           </div>
         </div>
@@ -13743,8 +13905,8 @@ export default function App() {
                 </SearchableSelect>
               </div>
               <div className="flex gap-2 pt-2">
-                <button onClick={() => handleSaveExpenseCategory(selectedExpenseCategory)} className="flex-1 py-2 bg-emerald-500 text-slate-950 font-bold rounded">Save Changes</button>
-                <button onClick={() => handleDeleteExpenseCategory(selectedExpenseCategory.id)} className="py-2 px-4 bg-red-500/20 text-red-400 font-bold rounded">Delete</button>
+                <button disabled={isBusy('expcat_save')} onClick={() => handleSaveExpenseCategory(selectedExpenseCategory)} className="flex-1 py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('expcat_save') ? 'Saving…' : 'Save Changes'}</button>
+                <button disabled={isBusy('expcat_del')} onClick={() => handleDeleteExpenseCategory(selectedExpenseCategory.id)} className="py-2 px-4 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('expcat_del') ? 'Deleting…' : 'Delete'}</button>
               </div>
             </div>
           </div>
@@ -13768,8 +13930,8 @@ export default function App() {
                 </SearchableSelect>
               </div>
               <div className="flex gap-2 pt-2">
-                <button onClick={() => handleSaveItemStatus(selectedItemStatus)} className="flex-1 py-2 bg-emerald-500 text-slate-950 font-bold rounded">Save Changes</button>
-                <button onClick={() => handleDeleteItemStatus(selectedItemStatus.id)} className="py-2 px-4 bg-red-500/20 text-red-400 font-bold rounded">Delete</button>
+                <button disabled={isBusy('itemstatus_save')} onClick={() => handleSaveItemStatus(selectedItemStatus)} className="flex-1 py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('itemstatus_save') ? 'Saving…' : 'Save Changes'}</button>
+                <button disabled={isBusy('itemstatus_del')} onClick={() => handleDeleteItemStatus(selectedItemStatus.id)} className="py-2 px-4 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('itemstatus_del') ? 'Deleting…' : 'Delete'}</button>
               </div>
             </div>
           </div>
@@ -13837,7 +13999,7 @@ export default function App() {
                 </SearchableSelect>
               </div>
             </div>
-            <button onClick={() => {
+            <button disabled={isBusy('emp_save')} onClick={() => {
               if (!employeeForm.name) { alert('Name is required'); return; }
               const emp = {
                 id: selectedEmployee?.id || `emp-${Date.now()}`,
@@ -13859,7 +14021,7 @@ export default function App() {
                 createdBy: selectedEmployee?.createdBy || currentUser?.name || currentUser?.id || ''
               };
               handleSaveEmployee(emp);
-            }} className="w-full py-2 bg-emerald-500 text-slate-950 font-bold rounded text-xs">Save Employee</button>
+            }} className="w-full py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded text-xs">{isBusy('emp_save') ? 'Saving…' : 'Save Employee'}</button>
           </div>
         </div>
       )}
@@ -13900,7 +14062,7 @@ export default function App() {
                 <p className="text-emerald-400 text-[11px]">Duration: {calcLeaveDays(leaveForm.startDate, leaveForm.endDate)} day(s)</p>
               )}
               <div><label className="text-slate-400 block mb-1">Reason</label><textarea value={leaveForm.reason} onChange={e => setLeaveForm({...leaveForm, reason: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white h-16" /></div>
-              <button onClick={handleSaveLeave} className="w-full py-2 bg-emerald-500 text-slate-950 font-bold rounded">Submit Leave Request</button>
+              <button disabled={isBusy('leave_create')} onClick={handleSaveLeave} className="w-full py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('leave_create') ? 'Submitting…' : 'Submit Leave Request'}</button>
             </div>
           </div>
         </div>
@@ -13961,8 +14123,8 @@ export default function App() {
                 return s + (it.price || 0) * ret;
               }, 0).toLocaleString()}
             </div>
-            <button onClick={handleProcessSalesReturn} className="w-full py-2 bg-amber-500 text-slate-950 font-bold rounded text-xs">
-              {(isAdminUser || canUpdate('sales')) ? 'Process Sales Return' : 'Submit Sales Return for Manager Approval'}
+            <button disabled={isBusy('sales_ret')} onClick={handleProcessSalesReturn} className="w-full py-2 bg-amber-500 disabled:opacity-50 text-slate-950 font-bold rounded text-xs">
+              {isBusy('sales_ret') ? 'Processing…' : ((isAdminUser || canUpdate('sales')) ? 'Process Sales Return' : 'Submit Sales Return for Manager Approval')}
             </button>
           </div>
         </div>
@@ -14016,8 +14178,8 @@ export default function App() {
               <label className="text-slate-400 text-xs block mb-1">Reason / Note for Manager (optional)</label>
               <input type="text" value={returnReasonDraft} onChange={e => setReturnReasonDraft(e.target.value)} placeholder="e.g. Damaged carton on delivery..." className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white text-xs" />
             </div>
-            <button onClick={handleProcessPurchaseReturn} className="w-full py-2 bg-amber-500 text-slate-950 font-bold rounded text-xs">
-              {(isAdminUser || canUpdate('purchase')) ? 'Process Purchase Return' : 'Submit Purchase Return for Manager Approval'}
+            <button disabled={isBusy('po_ret')} onClick={handleProcessPurchaseReturn} className="w-full py-2 bg-amber-500 disabled:opacity-50 text-slate-950 font-bold rounded text-xs">
+              {isBusy('po_ret') ? 'Processing…' : ((isAdminUser || canUpdate('purchase')) ? 'Process Purchase Return' : 'Submit Purchase Return for Manager Approval')}
             </button>
           </div>
         </div>
@@ -14060,8 +14222,8 @@ export default function App() {
                 </SearchableSelect>
               </div>
               <div className="flex gap-2 pt-2">
-                <button onClick={() => handleSaveLeaveRequest(selectedLeave)} className="flex-1 py-2 bg-emerald-500 text-slate-950 font-bold rounded">Save Changes</button>
-                <button onClick={() => handleDeleteLeaveRequest(selectedLeave.id)} className="px-4 py-2 bg-red-500/20 text-red-400 font-bold rounded">Delete</button>
+                <button disabled={isBusy('leave_save')} onClick={() => handleSaveLeaveRequest(selectedLeave)} className="flex-1 py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('leave_save') ? 'Saving…' : 'Save Changes'}</button>
+                <button disabled={isBusy('leave_del')} onClick={() => handleDeleteLeaveRequest(selectedLeave.id)} className="px-4 py-2 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('leave_del') ? 'Deleting…' : 'Delete'}</button>
               </div>
             </div>
           </div>
@@ -14095,13 +14257,13 @@ export default function App() {
                     </label>
                     <p className="text-[10px] text-slate-500">Uses shared master data from the parent business. Only stock/transactions are location-specific.</p>
                     <div className="flex gap-2 pt-2">
-                      <button type="button" className="flex-1 py-2 bg-emerald-500 text-slate-950 font-bold rounded" onClick={async () => {
+                      <button type="button" disabled={isBusy('branch_save')} className="flex-1 py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded" onClick={() => runWithLock('branch_save', async () => {
                         const res = await apiFetch('/api/branches/' + selectedBranch.id, { method: 'PUT', body: JSON.stringify(selectedBranch) });
                         if (!res.ok) { const d = await res.json().catch(() => ({})); return alert(d.error || 'Save failed'); }
                         const r2 = await apiFetch('/api/branches');
                         if (r2.ok) { const x = await r2.json(); setBranches(x.branches || []); setMaxBranches(x.maxBranches || maxBranches); }
                         setSelectedBranch(null);
-                      }}>Save</button>
+                      })}>{isBusy('branch_save') ? 'Saving…' : 'Save'}</button>
                       <button type="button" className="py-2 px-4 bg-slate-800 text-white font-bold rounded" onClick={() => setSelectedBranch(null)}>Close</button>
                     </div>
                   </div>
@@ -14122,21 +14284,21 @@ export default function App() {
               <div><label className="text-slate-400 block mb-1">Account Starting Balance</label><input type="number" value={paymentMethodForm.startingBalance} onChange={e => setPaymentMethodForm({...paymentMethodForm, startingBalance: e.target.value, currentBalance: paymentMethodForm.currentBalance === '' || paymentMethodForm.currentBalance == null ? e.target.value : paymentMethodForm.currentBalance})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /></div>
               <div><label className="text-slate-400 block mb-1">Current Balance</label><input type="number" value={paymentMethodForm.currentBalance} onChange={e => setPaymentMethodForm({...paymentMethodForm, currentBalance: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /><p className="text-[10px] text-slate-500 mt-1">Editable running balance for this account</p></div>
               <div className="flex gap-2">
-                <button onClick={() => {
+                <button disabled={isBusy('pm_save')} onClick={() => runWithLock('pm_save', async () => {
                   if (!paymentMethodForm.name) { alert('Name required'); return; }
                   if (selectedPaymentMethod) {
-                    persistPaymentMethods(paymentMethods.map(p => p.id === selectedPaymentMethod.id ? { ...p, name: paymentMethodForm.name, startingBalance: parseFloat(paymentMethodForm.startingBalance) || 0, currentBalance: parseFloat(paymentMethodForm.currentBalance) || 0 } : p));
+                    await persistPaymentMethods(paymentMethods.map(p => p.id === selectedPaymentMethod.id ? { ...p, name: paymentMethodForm.name, startingBalance: parseFloat(paymentMethodForm.startingBalance) || 0, currentBalance: parseFloat(paymentMethodForm.currentBalance) || 0 } : p));
                   } else {
-                    persistPaymentMethods([...paymentMethods, { id: `pm-${Date.now()}`, name: paymentMethodForm.name, startingBalance: parseFloat(paymentMethodForm.startingBalance) || 0, currentBalance: parseFloat(paymentMethodForm.currentBalance) || parseFloat(paymentMethodForm.startingBalance) || 0 }]);
+                    await persistPaymentMethods([...paymentMethods, { id: `pm-${Date.now()}`, name: paymentMethodForm.name, startingBalance: parseFloat(paymentMethodForm.startingBalance) || 0, currentBalance: parseFloat(paymentMethodForm.currentBalance) || parseFloat(paymentMethodForm.startingBalance) || 0 }]);
                   }
                   setPaymentMethodModalOpen(false);
-                }} className="flex-1 py-2 bg-emerald-500 text-slate-950 font-bold rounded">Save</button>
+                })} className="flex-1 py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('pm_save') ? 'Saving…' : 'Save'}</button>
                 {selectedPaymentMethod && (
-                  <button onClick={() => {
+                  <button disabled={isBusy('pm_del')} onClick={() => runWithLock('pm_del', async () => {
                     if (!confirm('Delete this payment method?')) return;
-                    persistPaymentMethods(paymentMethods.filter(p => p.id !== selectedPaymentMethod.id));
+                    await persistPaymentMethods(paymentMethods.filter(p => p.id !== selectedPaymentMethod.id));
                     setPaymentMethodModalOpen(false);
-                  }} className="px-4 py-2 bg-red-500/20 text-red-400 font-bold rounded">Delete</button>
+                  })} className="px-4 py-2 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('pm_del') ? 'Deleting…' : 'Delete'}</button>
                 )}
               </div>
             </div>
@@ -14164,21 +14326,21 @@ export default function App() {
               </div>
               <div><label className="text-slate-400 block mb-1">Days (for Credit / Layby)</label><input type="number" min="0" value={salesTermForm.days} onChange={e => setSalesTermForm({...salesTermForm, days: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" /></div>
               <div className="flex gap-2">
-                <button onClick={() => {
+                <button disabled={isBusy('st_save')} onClick={() => runWithLock('st_save', async () => {
                   if (!salesTermForm.name) { alert('Name required'); return; }
                   if (selectedSalesTerm) {
-                    persistSalesTerms(salesTerms.map(t => t.id === selectedSalesTerm.id ? { ...t, name: salesTermForm.name, type: salesTermForm.type, days: parseInt(salesTermForm.days, 10) || 0 } : t));
+                    await persistSalesTerms(salesTerms.map(t => t.id === selectedSalesTerm.id ? { ...t, name: salesTermForm.name, type: salesTermForm.type, days: parseInt(salesTermForm.days, 10) || 0 } : t));
                   } else {
-                    persistSalesTerms([...salesTerms, { id: `sterm-${Date.now()}`, name: salesTermForm.name, type: salesTermForm.type, days: parseInt(salesTermForm.days, 10) || 0 }]);
+                    await persistSalesTerms([...salesTerms, { id: `sterm-${Date.now()}`, name: salesTermForm.name, type: salesTermForm.type, days: parseInt(salesTermForm.days, 10) || 0 }]);
                   }
                   setSalesTermModalOpen(false);
-                }} className="flex-1 py-2 bg-emerald-500 text-slate-950 font-bold rounded">Save</button>
+                })} className="flex-1 py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('st_save') ? 'Saving…' : 'Save'}</button>
                 {selectedSalesTerm && (
-                  <button onClick={() => {
+                  <button disabled={isBusy('st_del')} onClick={() => runWithLock('st_del', async () => {
                     if (!confirm('Delete this sales term?')) return;
-                    persistSalesTerms(salesTerms.filter(t => t.id !== selectedSalesTerm.id));
+                    await persistSalesTerms(salesTerms.filter(t => t.id !== selectedSalesTerm.id));
                     setSalesTermModalOpen(false);
-                  }} className="px-4 py-2 bg-red-500/20 text-red-400 font-bold rounded">Delete</button>
+                  })} className="px-4 py-2 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded">{isBusy('st_del') ? 'Deleting…' : 'Delete'}</button>
                 )}
               </div>
             </div>
@@ -14243,13 +14405,13 @@ export default function App() {
                 <option value="A4">A4</option>
                 <option value="A5">A5</option>
               </SearchableSelect>
-              {(isAdminUser || canUpdate('payroll')) && <button onClick={() => {
+              {(isAdminUser || canUpdate('payroll')) && <button disabled={isBusy('payroll_save')} onClick={() => runWithLock('payroll_save', async () => {
                 const updated = { ...selectedPayroll, netPay: (parseFloat(selectedPayroll.basicSalary)||0) + (parseFloat(selectedPayroll.allowances)||0) - (parseFloat(selectedPayroll.deductions)||0) };
                 setPayrollRecords(payrollRecords.map(p => p.id === updated.id ? updated : p));
                 setSelectedPayroll(updated);
-                apiFetch(`/api/payroll/${updated.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) }).catch(() => {});
+                await apiFetch(`/api/payroll/${updated.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated) }).catch(() => {});
                 alert('Payroll updated.');
-              }} className="flex-1 py-2 bg-emerald-500 text-slate-950 font-bold rounded text-xs">Save Changes</button>}
+              })} className="flex-1 py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded text-xs">{isBusy('payroll_save') ? 'Saving…' : 'Save Changes'}</button>}
               <button onClick={() => {
                 const size = document.getElementById('payroll-paper-size')?.value || 'A4';
                 const style = document.getElementById('payroll-print-page-style') || document.createElement('style');
@@ -14258,13 +14420,13 @@ export default function App() {
                 document.head.appendChild(style);
                 window.print();
               }} className="px-4 py-2 bg-slate-700 text-white font-bold rounded text-xs flex items-center gap-1"><Printer className="w-3.5 h-3.5" /> Print</button>
-              {(isAdminUser || canDelete('payroll')) && <button onClick={() => handleDeletePayroll(selectedPayroll.id)} className="px-4 py-2 bg-red-500/20 text-red-400 font-bold rounded text-xs">Delete</button>}
+              {(isAdminUser || canDelete('payroll')) && <button disabled={isBusy('payroll_del')} onClick={() => handleDeletePayroll(selectedPayroll.id)} className="px-4 py-2 bg-red-500/20 disabled:opacity-50 text-red-400 font-bold rounded text-xs">{isBusy('payroll_del') ? 'Deleting…' : 'Delete'}</button>}
               {selectedPayroll.status !== 'Paid' && (isAdminUser || canUpdate('payroll')) && (
                 <>
                   <SearchableSelect value={payrollPayMethod} onChange={e => setPayrollPayMethod(e.target.value)} className="bg-slate-950 border border-slate-700 rounded text-xs text-white px-2">
                     {paymentMethods.map(pm => <option key={pm.id} value={pm.name}>{pm.name}</option>)}
                   </SearchableSelect>
-                  <button onClick={() => { handleMarkPayrollPaid(selectedPayroll, payrollPayMethod); setSelectedPayroll({...selectedPayroll, status: 'Paid', paidDate: new Date().toISOString().split('T')[0], paymentMethod: payrollPayMethod}); }} className="px-4 py-2 bg-emerald-500/20 text-emerald-400 font-bold rounded text-xs">Mark Paid</button>
+                  <button disabled={isBusy(`payroll_pay:${selectedPayroll.id}`)} onClick={async () => { await handleMarkPayrollPaid(selectedPayroll, payrollPayMethod); setSelectedPayroll({...selectedPayroll, status: 'Paid', paidDate: new Date().toISOString().split('T')[0], paymentMethod: payrollPayMethod}); }} className="px-4 py-2 bg-emerald-500/20 disabled:opacity-50 text-emerald-400 font-bold rounded text-xs">{isBusy(`payroll_pay:${selectedPayroll.id}`) ? 'Paying…' : 'Mark Paid'}</button>
                 </>
               )}
             </div>
@@ -14328,7 +14490,7 @@ export default function App() {
                 <label className="text-slate-400 block mb-1">Notes</label>
                 <input type="text" value={payrollForm.notes || ''} onChange={e => setPayrollForm({...payrollForm, notes: e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white" />
               </div>
-              <button onClick={handleGeneratePayroll} className="w-full py-2 bg-emerald-500 text-slate-950 font-bold rounded">Create Payroll Record</button>
+              <button disabled={isBusy('payroll_create')} onClick={handleGeneratePayroll} className="w-full py-2 bg-emerald-500 disabled:opacity-50 text-slate-950 font-bold rounded">{isBusy('payroll_create') ? 'Creating…' : 'Create Payroll Record'}</button>
             </div>
           </div>
         </div>
@@ -14392,10 +14554,9 @@ export default function App() {
               </button>
               <button
                 type="button"
-                disabled={poReceiveBusy || sessionExpiredModalOpen}
+                disabled={poReceiveBusy}
                 onClick={async () => {
                   if (poReceiveBusy) return;
-                  if (sessionExpiredModalOpen) { alert('Session expired — sign in again to continue.'); return; }
                   const lines = poReceivePO._receiveLines || [];
                   const receiveLines = [];
                   for (let idx = 0; idx < lines.length; idx++) {
@@ -14545,7 +14706,7 @@ export default function App() {
 
               <button
                 type="button"
-                disabled={legacyAssignBusy || selectedCount === 0 || sessionExpiredModalOpen}
+                disabled={legacyAssignBusy || selectedCount === 0}
                 onClick={async () => {
                   if (legacyAssignBusy) return;
                   const itemIds = legacyUnassignedList.filter(it => legacyAssignSelectedIds[it.id]).map(it => it.id);
@@ -14598,109 +14759,37 @@ export default function App() {
         );
       })()}
 
-      {/* Blocking Session Expired Re-Auth Modal */}
-      {sessionExpiredModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-sm flex items-center justify-center z-[120] p-4">
-          <div className="bg-slate-900 border border-rose-500/60 p-6 rounded-2xl w-full max-w-md space-y-4 shadow-2xl">
-            <div className="space-y-1 border-b border-slate-800 pb-3">
-              <h4 className="font-bold text-rose-400 text-base">Session expired — sign in again</h4>
-              <p className="text-xs text-slate-300">Your authentication token expired or is no longer valid. Sign back in below to resume with your unsaved cart and forms intact.</p>
-            </div>
-            {sessionReauthError && (
-              <div className="bg-rose-500/10 border border-rose-500/40 rounded-lg px-3 py-2 text-xs text-rose-300">
-                {sessionReauthError}
-              </div>
-            )}
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="text-slate-400 block mb-1">Username</label>
-                <input
-                  type="text"
-                  value={sessionReauthUser}
-                  onChange={e => setSessionReauthUser(e.target.value)}
-                  disabled={sessionReauthBusy}
-                  placeholder="Enter username"
-                  className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white"
-                />
-              </div>
-              <div>
-                <label className="text-slate-400 block mb-1">PIN / Password</label>
-                <input
-                  type="password"
-                  value={sessionReauthPin}
-                  onChange={e => setSessionReauthPin(e.target.value)}
-                  disabled={sessionReauthBusy}
-                  placeholder="Enter PIN or password"
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' && !sessionReauthBusy) {
-                      document.getElementById('session-reauth-submit-btn')?.click();
-                    }
-                  }}
-                  className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white"
-                />
-              </div>
-              <div className="flex gap-2 pt-1">
-                <button
-                  id="session-reauth-submit-btn"
-                  type="button"
-                  disabled={sessionReauthBusy || !sessionReauthUser.trim() || !sessionReauthPin}
-                  onClick={async () => {
-                    if (sessionReauthBusy) return;
-                    setSessionReauthBusy(true);
-                    setSessionReauthError('');
-                    try {
-                      const endpoint = tenantInfo?.isSuperAdmin ? '/api/super-login' : '/api/login';
-                      const res = await fetch(endpoint, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ username: sessionReauthUser.trim(), pin: sessionReauthPin })
-                      });
-                      const data = await res.json().catch(() => ({}));
-                      if (!res.ok || !data.token) {
-                        setSessionReauthError(data.error || 'Sign in failed. Please check your credentials.');
-                        setSessionReauthBusy(false);
-                        return;
-                      }
-                      setAuthToken(data.token);
-                      try {
-                        localStorage.setItem('erp_auth_token', data.token);
-                        localStorage.setItem('erp_login_time', Date.now().toString());
-                      } catch (_) {}
-                      if (data.privileges && typeof data.privileges === 'object') {
-                        setLoginPrivileges(data.privileges);
-                        try { localStorage.setItem('erp_login_privileges', JSON.stringify(data.privileges)); } catch (_) {}
-                      }
-                      if (data.user) {
-                        setCurrentUser(data.user);
-                      }
-                      setSessionReauthPin('');
-                      setSessionReauthError('');
-                      setSessionExpiredModalOpen(false);
-                    } catch (e) {
-                      setSessionReauthError('Network error while signing in. Please try again.');
-                    } finally {
-                      setSessionReauthBusy(false);
-                    }
-                  }}
-                  className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 text-slate-950 font-bold rounded-lg"
-                >
-                  {sessionReauthBusy ? 'Signing in…' : 'Sign In & Resume'}
-                </button>
-                <button
-                  type="button"
-                  disabled={sessionReauthBusy}
-                  onClick={() => {
-                    setSessionExpiredModalOpen(false);
-                    handleLogout();
-                  }}
-                  className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-lg"
-                >
-                  Logout instead
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+      {isLoggedIn && needsBusinessWizard && !tenantInfo?.isSuperAdmin && (
+        <React.Suspense fallback={null}>
+          <NewBusinessWizardModal
+            shopProfile={shopProfile}
+            branches={branches}
+            taxSettings={taxSettings}
+            paymentMethods={paymentMethods}
+            categories={categories}
+            apiFetch={apiFetch}
+            compressLogoImage={compressLogoImage}
+            onClose={() => setNeedsBusinessWizard(false)}
+            onCompleted={({ shopProfile: sp, updatedBranch, taxSettings: ts, paymentMethods: pms, createdCategories }) => {
+              if (sp) setShopProfile(sp);
+              if (updatedBranch) {
+                setBranches(prev => {
+                  const arr = Array.isArray(prev) ? prev : [];
+                  const exists = arr.some(b => String(b.id) === String(updatedBranch.id));
+                  return exists
+                    ? arr.map(b => (String(b.id) === String(updatedBranch.id) ? updatedBranch : { ...b, isDefault: false }))
+                    : [...arr, updatedBranch];
+                });
+              }
+              if (ts) setTaxSettings(ts);
+              if (Array.isArray(pms) && pms.length > 0) setPaymentMethods(pms);
+              if (Array.isArray(createdCategories) && createdCategories.length > 0) {
+                setCategories(prev => [...(Array.isArray(prev) ? prev : []), ...createdCategories]);
+              }
+              setNeedsBusinessWizard(false);
+            }}
+          />
+        </React.Suspense>
       )}
 
     </div>

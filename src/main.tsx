@@ -1,8 +1,10 @@
-import { StrictMode } from 'react';
+import { StrictMode, Suspense, lazy } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
+
+// Lazy-load main ERP application bundle
 // @ts-ignore
-import App from './App.jsx';
+const App = lazy(() => import('./App.jsx'));
 
 // Non-blocking toast notification & browser-extension fetch descriptor bridge for iframe compatibility
 if (typeof window !== 'undefined') {
@@ -64,6 +66,15 @@ if (typeof window !== 'undefined') {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center gap-3 text-slate-300">
+          <div className="w-8 h-8 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
+          <p className="text-xs font-medium tracking-wide text-slate-400">Loading A40 ERP…</p>
+        </div>
+      }
+    >
+      <App />
+    </Suspense>
   </StrictMode>,
 );
